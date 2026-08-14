@@ -15,6 +15,7 @@
   const UNIT_NORM_MAX = 1.02;
   const STANDARD_GRAVITY_MPS2 = 9.80665;
   const VEHICLE_FLU_AXES_FLAG = 'flu_axes';
+  const RELAY_EVENT_HISTORY_LIMIT = 32;
   const DEFAULT_MOTION_OPTIONS = Object.freeze({
     cornerLateralStartMps2: 1.5,
     cornerLateralFullMps2: 6.0,
@@ -22,19 +23,25 @@
     cornerYawFullRadPerSec: 1.2,
     cornerAttackSeconds: 0.08,
     cornerReleaseSeconds: 0.16,
+    surfaceBaselineSeconds: 0.35,
+    surfaceForwardWeight: 0.25,
+    surfaceRoughnessStartMps2: 0.25,
+    surfaceRoughnessFullMps2: 1.80,
+    surfaceAttackSeconds: 0.06,
+    surfaceReleaseSeconds: 0.22,
     impactForwardMps2: 8.5,
     impactVerticalMps2: 5.5,
     impactLateralMps2: 10.0,
     impactLateralYawMaxRadPerSec: 0.35,
     impactJerkMps3: 80.0,
     // M5 の impact_candidate は生の候補であり、通常走行中にも小さな値が混ざる。
-    // Viewer で段階化してから OSD / FFB に渡す。
+    // このローカル段階化は診断・将来の路面表現用。公式HUD/FFB pulseはRelay確定イベントを使う。
     impactWeakMagnitudeMps2: 10.0,
     impactStrongMagnitudeMps2: 12.0,
     impactStrongJerkMps3: 250.0,
-    impactSevereMagnitudeMps2: 18.0,
+    impactSevereMagnitudeMps2: 15.0,
     // 大きな加速度ピークだけでは軽い壁接触も重衝撃に見えるため、HEAVY は急峻さも要求する。
-    impactSevereJerkMps3: 250.0,
+    impactSevereJerkMps3: 750.0,
     impactRearmMagnitudeMps2: 5.0,
     impactRearmHoldMs: 500,
     // weak はグラベルや縁石の連続入力を表せるよう、完全な静止待ちをせず短い間隔で再通知する。
@@ -327,14 +334,139 @@
     };
   }
 
+  function parseVehicleImpactEvent(value) {
+    if (!isPlainObject(value)
+        || value.type !== 'vehicle_event'
+        || value.version !== 1
+        || typeof value.eventId !== 'string' || !value.eventId
+        || typeof value.raceRunId !== 'string'
+        || typeof value.carId !== 'string' || !value.carId
+        || !['weak', 'strong', 'severe'].includes(value.impactClass)
+        || !isNumberInRange(value.magnitudeMps2, 0, 1000)
+        || !isNumberInRange(value.jerkMps3, 0, 1000000)
+        || !isVector(value.axis, 3, -2, 2)
+        || typeof value.damageApplied !== 'boolean'
+        || !isNumberInRange(value.damage, 0, 100)
+        || !isNumberInRange(value.hpBefore, 0, 100)
+        || !isNumberInRange(value.hpAfter, 0, 100)
+        || !Number.isSafeInteger(value.serverTimeMs) || value.serverTimeMs < 0) {
+      return null;
+    }
+    const suppressionReason = value.suppressionReason === undefined
+      ? ''
+      : String(value.suppressionReason);
+    if (!['', 'cooldown', 'below_damage_threshold'].includes(suppressionReason)
+        || (value.damageApplied && suppressionReason)
+        || (!value.damageApplied && value.damage !== 0)) {
+      return null;
+    }
+    return Object.freeze({
+      type: 'vehicle_event',
+      version: 1,
+      eventId: value.eventId,
+      raceRunId: value.raceRunId,
+      carId: value.carId,
+      impactClass: value.impactClass,
+      magnitudeMps2: value.magnitudeMps2,
+      jerkMps3: value.jerkMps3,
+      axis: Object.freeze(value.axis.slice()),
+      damageApplied: value.damageApplied,
+      damage: value.damage,
+      suppressionReason,
+      hpBefore: value.hpBefore,
+      hpAfter: value.hpAfter,
+      serverTimeMs: value.serverTimeMs,
+    });
+  }
+
+  function parseRelayEventMessage(message) {
+    if (typeof message !== 'string') return null;
+    let payload;
+    try {
+      payload = JSON.parse(message);
+    } catch (_) {
+      return null;
+    }
+    if (payload?.type === 'vehicle_event') {
+      const event = parseVehicleImpactEvent(payload);
+      return event ? { kind: 'live', event } : null;
+    }
+    if (!isPlainObject(payload)
+        || payload.type !== 'vehicle_event_snapshot'
+        || payload.version !== 1
+        || typeof payload.raceRunId !== 'string'
+        || !Array.isArray(payload.events)
+        || payload.events.length > RELAY_EVENT_HISTORY_LIMIT) {
+      return null;
+    }
+    const events = payload.events.map(parseVehicleImpactEvent);
+    if (events.some((event) => !event)
+        || events.some((event) => event.raceRunId !== payload.raceRunId)
+        || new Set(events.map((event) => event.eventId)).size !== events.length) {
+      return null;
+    }
+    return {
+      kind: 'snapshot',
+      raceRunId: payload.raceRunId,
+      events: Object.freeze(events),
+    };
+  }
+
+  class RelayEventInbox {
+    constructor() {
+      this.raceRunId = '';
+      this.history = [];
+      this.seen = new Set();
+    }
+
+    reset(raceRunId) {
+      this.raceRunId = raceRunId;
+      this.history = [];
+      this.seen.clear();
+    }
+
+    ingest(message) {
+      const parsed = parseRelayEventMessage(message);
+      if (!parsed) return { status: 'invalid', transient: false };
+      if (parsed.kind === 'snapshot') {
+        this.reset(parsed.raceRunId);
+        this.history = parsed.events.slice(-RELAY_EVENT_HISTORY_LIMIT);
+        this.seen = new Set(this.history.map((event) => event.eventId));
+        return {
+          status: 'snapshot',
+          transient: false,
+          raceRunId: this.raceRunId,
+          events: this.history.slice(),
+        };
+      }
+      const event = parsed.event;
+      if (event.raceRunId !== this.raceRunId) this.reset(event.raceRunId);
+      if (this.seen.has(event.eventId)) {
+        return { status: 'duplicate', transient: false, event };
+      }
+      this.seen.add(event.eventId);
+      this.history.push(event);
+      if (this.history.length > RELAY_EVENT_HISTORY_LIMIT) {
+        this.history.shift();
+      }
+      return {
+        status: 'live',
+        transient: true,
+        event,
+        raceRunId: this.raceRunId,
+        events: this.history.slice(),
+      };
+    }
+  }
+
   function deriveFfbLongitudinalLoad(input, options = {}) {
     const forwardMps2 = Number(input?.forwardMps2);
     if (!Number.isFinite(forwardMps2)) {
       return { frontLoad: 0, measuredLoad: 0 };
     }
 
-    const startMps2 = Math.max(0, Number(options.startMps2 ?? 3.0));
-    const fullMps2 = Math.max(startMps2 + 0.1, Number(options.fullMps2 ?? 7.0));
+    const startMps2 = Math.max(0, Number(options.startMps2 ?? 1.0));
+    const fullMps2 = Math.max(startMps2 + 0.1, Number(options.fullMps2 ?? 3.5));
     const measuredLoad = clamp(
       ((-forwardMps2) - startMps2) / (fullMps2 - startMps2),
       0,
@@ -401,6 +533,38 @@
         motion.lateralMps2,
         motion.verticalMps2,
       );
+      const surfaceForwardBaselineMps2 = approach(
+        previous?.surfaceForwardBaselineMps2 ?? motion.forwardMps2,
+        motion.forwardMps2,
+        elapsedSeconds,
+        this.options.surfaceBaselineSeconds,
+        this.options.surfaceBaselineSeconds,
+      );
+      const surfaceVerticalBaselineMps2 = approach(
+        previous?.surfaceVerticalBaselineMps2 ?? motion.verticalMps2,
+        motion.verticalMps2,
+        elapsedSeconds,
+        this.options.surfaceBaselineSeconds,
+        this.options.surfaceBaselineSeconds,
+      );
+      const surfaceDynamicMps2 = Math.hypot(
+        motion.verticalMps2 - surfaceVerticalBaselineMps2,
+        (motion.forwardMps2 - surfaceForwardBaselineMps2) * this.options.surfaceForwardWeight,
+      );
+      // 路面入力は衝突とは独立させる。衝突フレームでは路面側を減衰させ、二重出力を避ける。
+      const surfaceRaw = impactRaw ? 0 : clamp(
+        (surfaceDynamicMps2 - this.options.surfaceRoughnessStartMps2)
+          / (this.options.surfaceRoughnessFullMps2 - this.options.surfaceRoughnessStartMps2),
+        0,
+        1,
+      );
+      const surfaceRoughness = approach(
+        previous?.surfaceRoughness || 0,
+        surfaceRaw,
+        elapsedSeconds,
+        this.options.surfaceAttackSeconds,
+        this.options.surfaceReleaseSeconds,
+      );
       let impactArmed = previous?.impactArmed !== false;
       let impactQuietSinceMs = previous?.impactQuietSinceMs ?? null;
       if (dynamicMagnitudeMps2 < this.options.impactRearmMagnitudeMps2) {
@@ -442,6 +606,10 @@
         motion,
         jerkMps3,
         cornerLoad,
+        surfaceForwardBaselineMps2,
+        surfaceVerticalBaselineMps2,
+        surfaceDynamicMps2,
+        surfaceRoughness,
         impact,
         impactLevel,
         impactArmed: impact ? false : impactArmed,
@@ -725,6 +893,7 @@
     TELEMETRY_PREFIX,
     VEHICLE_FLU_AXES_FLAG,
     MotionFeatureExtractor,
+    RelayEventInbox,
     TelemetryMockGenerator,
     TelemetryTracker,
     classifySequence,
@@ -733,5 +902,6 @@
     encodeTelemetry,
     getStaleThresholdMs,
     parseTelemetryMessage,
+    parseRelayEventMessage,
   };
 }));
