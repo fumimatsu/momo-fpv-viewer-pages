@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const PILOT_BUILD_ID = '20260814-public-relay-v1';
+  const PILOT_BUILD_ID = '20260814-ayame-lease-resume-v1';
   const DEFAULT_HOST = '192.168.11.3:8080';
   const RECONNECT_BASE_DELAY_MS = 500;
   const RECONNECT_MAX_DELAY_MS = 5000;
@@ -82,9 +82,9 @@
   const FFB_BASE_DAMPER = Math.max(0, Math.min(1.0, getNumberParamWithProfile('ffbBaseDamper', 'ffbBaseDamper', 0.05)));
   const FFB_SPEED_DAMPER = Math.max(0, Math.min(1.0, getNumberParamWithProfile('ffbSpeedDamper', 'ffbSpeedDamper', 0.15)));
   const FFB_PRESETS = Object.freeze({
-    weak: Object.freeze({ scale: 0.65, label: 'Weak' }),
-    medium: Object.freeze({ scale: 1.35, label: 'Medium' }),
-    strong: Object.freeze({ scale: 2.00, label: 'Strong' }),
+    weak: Object.freeze({ label: 'Weak' }),
+    medium: Object.freeze({ label: 'Medium' }),
+    strong: Object.freeze({ label: 'Strong' }),
   });
   const CALIBRATION_STEPS = Object.freeze([
     Object.freeze({ id: 'confirmButton', title: 'CONFIRM BUTTON', instruction: '以降の記録と保存に使う決定ボタンを一度押してください。このボタンは走行操作には割り当てません。', button: true, confirm: true, visual: 'button', visualKey: 'OK', visualHint: 'PRESS ONCE' }),
@@ -104,64 +104,8 @@
   const FFB_INITIAL_PRESET = normalizeFfbPreset(getStringParam('ffbPreset', GAMEPAD_PROFILE?.ffbPreset || 'medium'));
   const FFB_SEND_INTERVAL_MS = Math.max(20, Math.min(100, getNumberParam('ffbSendMs', 20)));
   const FFB_RECONNECT_DELAY_MS = 2000;
-  const FFB_SPEED_PROXY_ACCEL_PER_SEC = 0.55;
-  const FFB_SPEED_PROXY_COAST_DECEL_PER_SEC = 0.22;
-  const FFB_SPEED_PROXY_BRAKE_DECEL_PER_SEC = 1.10;
-  // R3 の初期実走確認は抵抗を明確に感じられる強さから始め、後で下げる。
-  const FFB_RESPONSE_SCALE = Math.max(0.5, Math.min(2.0,
-    getNumberParam('ffbResponseScale', 1.45)));
-  // コーナリング時は、旋回入力を助けず反対側へ抵抗を返す。
-  const FFB_TELEMETRY_CORNER_DAMPER = Math.max(0, Math.min(0.3,
-    getNumberParam('ffbTelemetryCornerDamper', 0.18)));
-  const FFB_TELEMETRY_CORNER_TORQUE = Math.max(0, Math.min(0.5,
-    getNumberParam('ffbTelemetryCornerTorque', 0.12)));
-  const FFB_TELEMETRY_CORNER_LATERAL_FULL_MPS2 = Math.max(1, Math.min(20,
-    getNumberParam('ffbTelemetryCornerLateralFull', 6.0)));
-  const FFB_TELEMETRY_FRONT_LOAD_START_MPS2 = Math.max(0, Math.min(5,
-    getNumberParam('ffbTelemetryFrontLoadStart', 1.0)));
-  const FFB_TELEMETRY_FRONT_LOAD_FULL_MPS2 = Math.max(
-    FFB_TELEMETRY_FRONT_LOAD_START_MPS2 + 0.1,
-    Math.min(20, getNumberParam('ffbTelemetryFrontLoadFull', 3.5)),
-  );
-  const FFB_TELEMETRY_FRONT_LOAD_FRICTION = Math.max(0, Math.min(0.3,
-    getNumberParam('ffbTelemetryFrontLoadFriction', 0.10)));
-  const FFB_TELEMETRY_FRONT_LOAD_DAMPER = Math.max(0, Math.min(0.3,
-    getNumberParam('ffbTelemetryFrontLoadDamper', 0.14)));
-  const FFB_TELEMETRY_FRONT_LOAD_ATTACK_SECONDS = 0.08;
-  const FFB_TELEMETRY_FRONT_LOAD_RELEASE_SECONDS = 0.20;
-  const FFB_TELEMETRY_SURFACE_TORQUE = Math.max(0, Math.min(0.2,
-    getNumberParam('ffbTelemetrySurfaceTorque', 0.06)));
-  const FFB_IMPACT_DAMPER = Math.max(0, Math.min(0.8,
-    getNumberParam('ffbImpactDamper', 0.55)));
-  const FFB_IMPACT_FRICTION = Math.max(0, Math.min(0.5,
-    getNumberParam('ffbImpactFriction', 0.22)));
-  const FFB_IMPACT_TORQUE = Math.max(0, Math.min(1.0,
-    getNumberParam('ffbImpactTorque', 0.62)));
-  // 路面振動、接触、クラッシュを同じ衝撃として扱わず、パルスと粘りを別々に段階化する。
-  const FFB_IMPACT_PROFILES = Object.freeze({
-    strong: Object.freeze({
-      pulseScale: 0.85,
-      boostScale: 0.80,
-      boostDurationMs: 360,
-      pulseKind: 'hit',
-    }),
-    severe: Object.freeze({
-      pulseScale: 1.0,
-      boostScale: 1.0,
-      boostDurationMs: 520,
-      pulseKind: 'impact',
-    }),
-  });
-  const FFB_IMPACT_DIRECTION_MIN_AXIS = Math.max(0.05, Math.min(0.9,
-    getNumberParam('ffbImpactDirectionMinAxis', 0.12)));
   const FFB_DIRECTION_SIGN = getNumberParam('ffbDirectionSign', 1) < 0 ? -1 : 1;
-  // URL 指定は、車種別の既定値より優先する。
   const FFB_CORNER_DIRECTION_SIGN = getNumberParam('ffbCornerDirectionSign', -1) < 0 ? -1 : 1;
-  const FFB_CORNER_DIRECTION_SIGN_EXPLICIT = getUrlParams().has('ffbCornerDirectionSign');
-  const FFB_TELEMETRY_TORQUE_MAX = Math.max(0.1, Math.min(1.0,
-    getNumberParam('ffbTelemetryTorqueMax', 0.85)));
-  const FFB_DAMAGE_RATTLE_TORQUE = Math.max(0, Math.min(0.25,
-    getNumberParam('ffbDamageRattleTorque', 0.11)));
   const AYAME_SIGNALING_URL = getStringParam(
     ['ayameUrl', 'signalingUrl'],
     'wss://ayame-labo.shiguredo.app/signaling',
@@ -204,6 +148,7 @@
   const ROOM_LOCK_TTL_SEC = getNumberParam('roomLockTtl', 30);
   const ROOM_LOCK_POLL_MS = getNumberParam('roomLockPollMs', 5000);
   const ROOM_LOCK_HEARTBEAT_MAX_FAILURES = Math.max(1, getIntegerParam('roomLockHeartbeatFailures', 3));
+  const ROOM_LEASE_STORAGE_KEY = 'fpvAyameRoomLeaseV1';
   const RACE_START_SIGNAL_LIGHT_COUNT = 5;
   const RACE_START_SIGNAL_GREEN_MS = Math.max(0, getNumberParam('raceSignalMs', 1500));
   const RACE_BATTLE_ENABLED = getBooleanParam('raceBattle', true);
@@ -362,12 +307,7 @@
   let ffbSendTimer = 0;
   let ffbReconnectTimer = 0;
   let ffbShuttingDown = false;
-  let ffbSpeedProxy = 0;
-  let ffbSpeedProxyAt = performance.now();
-  let ffbFrontLoad = 0;
-  let ffbFrontLoadAt = performance.now();
-  let ffbSurfaceRoughness = 0;
-  let latestConfirmedImpact = null;
+  let ffbNativeProtocolWarningShown = false;
   let lastMotionEventHudId = '';
   let motionEventFlashTimer = 0;
   let cursorHideTimer = 0;
@@ -837,7 +777,18 @@
     if (configured && configured.toLowerCase() !== 'auto') {
       return configured;
     }
-    return createAyameClientId();
+    const storageKey = `fpvAyameClientIdV1:${AYAME_ROOM_ID || 'default'}`;
+    try {
+      const stored = window.sessionStorage?.getItem(storageKey) || '';
+      if (/^fpv-viewer-[a-z0-9-]+$/i.test(stored)) {
+        return stored;
+      }
+      const created = createAyameClientId();
+      window.sessionStorage?.setItem(storageKey, created);
+      return created;
+    } catch (_) {
+      return createAyameClientId();
+    }
   }
 
   function isAyameSignaling() {
@@ -2442,48 +2393,7 @@
       dataTextInput.value = lastRcCommand;
     }
     updateRcUi();
-    sendFfbSteering();
-  }
-
-  function updateFfbSpeedProxy() {
-    const now = performance.now();
-    const elapsedSec = Math.max(0, Math.min(0.25, (now - ffbSpeedProxyAt) / 1000));
-    ffbSpeedProxyAt = now;
-    const throttleValue = Number(throttleInput?.value || 1500);
-    const forward = Math.max(0, Math.min(1, (throttleValue - 1500) / 500));
-    const braking = Math.max(0, Math.min(1, (1500 - throttleValue) / 500));
-    const rate = forward > ffbSpeedProxy
-      ? FFB_SPEED_PROXY_ACCEL_PER_SEC
-      : braking > 0.01
-        ? FFB_SPEED_PROXY_BRAKE_DECEL_PER_SEC
-        : FFB_SPEED_PROXY_COAST_DECEL_PER_SEC;
-    const step = rate * elapsedSec;
-    ffbSpeedProxy += Math.max(-step, Math.min(step, forward - ffbSpeedProxy));
-    return ffbSpeedProxy;
-  }
-
-  function updateFfbFrontLoad(motion) {
-    const now = performance.now();
-    const elapsedSec = Math.max(0, Math.min(0.25, (now - ffbFrontLoadAt) / 1000));
-    ffbFrontLoadAt = now;
-    const load = motion && !motion.stale
-      ? window.FpvTelemetry?.deriveFfbLongitudinalLoad?.({
-        forwardMps2: motion.motion?.forwardMps2,
-      }, {
-        startMps2: FFB_TELEMETRY_FRONT_LOAD_START_MPS2,
-        fullMps2: FFB_TELEMETRY_FRONT_LOAD_FULL_MPS2,
-      })
-      : null;
-    const target = Math.max(0, Math.min(1, Number(load?.frontLoad) || 0));
-    const duration = target > ffbFrontLoad
-      ? FFB_TELEMETRY_FRONT_LOAD_ATTACK_SECONDS
-      : FFB_TELEMETRY_FRONT_LOAD_RELEASE_SECONDS;
-    const alpha = duration > 0 ? 1 - Math.exp(-elapsedSec / duration) : 1;
-    ffbFrontLoad += (target - ffbFrontLoad) * alpha;
-    return {
-      value: ffbFrontLoad,
-      measured: Number(load?.measuredLoad) || 0,
-    };
+    sendFfbState();
   }
 
   function scheduleFfbReconnect() {
@@ -2515,10 +2425,10 @@
       return;
     }
     ffbAcquireRequestedDeviceId = String(state.selectedDeviceId || ffbAcquireRequestedDeviceId);
-    sendFfbSteering();
+    sendFfbState();
   }
 
-  function sendFfbSteering() {
+  function sendFfbState() {
     if (!ffbClient) return;
     const snapshot = ffbClient.snapshot();
     if (!ffbOutputEnabled || !rcDriveEnabled || !snapshot.acquired) {
@@ -2528,125 +2438,41 @@
       }
       return;
     }
-    const speedProxy = updateFfbSpeedProxy();
-    const preset = FFB_PRESETS[activeFfbPreset];
-    const capabilities = getFfbCapabilities(snapshot.deviceCapabilities);
+    if (!ffbClient.supportsFeature?.('vehicleDynamicsV1')) {
+      if (!ffbNativeProtocolWarningShown) {
+        console.warn('FFB Bridge must support vehicleDynamicsV1. Update the Native Bridge.');
+        ffbNativeProtocolWarningShown = true;
+      }
+      if (ffbForceActive) ffbClient.stopAll();
+      ffbForceActive = false;
+      return;
+    }
+    ffbNativeProtocolWarningShown = false;
     const motion = getMotionSnapshot();
-    const responseScale = preset.scale * FFB_RESPONSE_SCALE;
-    const frontLoad = updateFfbFrontLoad(motion);
-    const surfaceSpeedGate = Math.max(0, Math.min(1, (speedProxy - 0.05) / 0.20));
-    ffbSurfaceRoughness = motion && !motion.stale
-      ? Math.max(0, Math.min(1, Number(motion.surfaceRoughness) || 0)) * surfaceSpeedGate
-      : 0;
-    const cornerDamper = motion && !motion.stale
-      ? FFB_TELEMETRY_CORNER_DAMPER * motion.cornerLoad * responseScale
-      : 0;
-    const frontLoadFriction = FFB_TELEMETRY_FRONT_LOAD_FRICTION
-      * frontLoad.value * responseScale;
-    const frontLoadDamper = FFB_TELEMETRY_FRONT_LOAD_DAMPER
-      * frontLoad.value * responseScale;
-    const impactBoost = getImpactFfbBoost(performance.now());
-    const damageEffect = getDamageFfbEffect(performance.now(), responseScale);
-    const telemetryTorque = getTelemetryFfbTorque(
-      motion,
-      impactBoost,
-      responseScale,
-      snapshot.deviceProfile,
-    );
-    ffbClient.sendFfb({
-      torque: Math.max(-FFB_TELEMETRY_TORQUE_MAX, Math.min(
-        FFB_TELEMETRY_TORQUE_MAX,
-        telemetryTorque + damageEffect.torque,
-      )),
-      gain: 1,
+    const motionFresh = Boolean(motion && !motion.stale);
+    const throttle = Math.max(-1, Math.min(1, (Number(throttleInput?.value || 1500) - 1500) / 500));
+    const sent = ffbClient.sendVehicleDynamics({
       enabled: true,
-      effectMode: 'baseline',
-      telemetryTorque,
-      speedProxy,
-      frontLoad: frontLoad.value,
-      frontLoadMeasured: frontLoad.measured,
-      surfaceRoughness: ffbSurfaceRoughness,
-      surfaceTorque: FFB_TELEMETRY_SURFACE_TORQUE * ffbSurfaceRoughness * responseScale,
-      baseFriction: capabilities.friction
-        ? Math.min(1, (FFB_BASE_FRICTION * responseScale) + frontLoadFriction
-          + impactBoost.friction + damageEffect.friction)
-        : 0,
-      parkingFriction: capabilities.friction ? FFB_PARKING_FRICTION * responseScale : 0,
-      baseDamper: capabilities.damper
-        ? Math.min(1, (FFB_BASE_DAMPER * responseScale) + cornerDamper + frontLoadDamper
-          + impactBoost.damper + damageEffect.damper)
-        : 0,
-      speedDamper: capabilities.damper ? FFB_SPEED_DAMPER * responseScale : 0,
-      damper: 0,
-      friction: 0,
-      inertia: 0,
+      preset: activeFfbPreset,
+      throttle,
+      baseFriction: FFB_BASE_FRICTION,
+      parkingFriction: FFB_PARKING_FRICTION,
+      baseDamper: FFB_BASE_DAMPER,
+      speedDamper: FFB_SPEED_DAMPER,
+      motionFresh,
+      forwardMps2: motionFresh ? Number(motion.motion?.forwardMps2) || 0 : 0,
+      lateralMps2: motionFresh ? Number(motion.motion?.lateralMps2) || 0 : 0,
+      cornerLoad: motionFresh ? Number(motion.cornerLoad) || 0 : 0,
+      surfaceRoughness: motionFresh ? Number(motion.surfaceRoughness) || 0 : 0,
+      hp: Number.isFinite(Number(vehicleHealth?.hp)) ? Number(vehicleHealth.hp) : 100,
+      cornerDirectionSign: FFB_CORNER_DIRECTION_SIGN,
     });
-    ffbForceActive = true;
-  }
-
-  function getImpactFfbBoost(nowMs) {
-    if (!latestConfirmedImpact) {
-      return { damper: 0, friction: 0, torque: 0 };
-    }
-    const impactClass = String(latestConfirmedImpact.impactClass || '').toLowerCase();
-    const profile = FFB_IMPACT_PROFILES[impactClass];
-    if (!profile) {
-      return { damper: 0, friction: 0, torque: 0 };
-    }
-    const ageMs = nowMs - latestConfirmedImpact.receivedAtMs;
-    if (ageMs < 0 || ageMs >= profile.boostDurationMs) {
-      return { damper: 0, friction: 0, torque: 0 };
-    }
-    const fade = 1 - (ageMs / profile.boostDurationMs);
-    // 方向トルクは Bridge の impactPulse が時間どおりに再生する。
-    // ここは衝突中の粘りだけを通常 FFB に加える。
-    return {
-      damper: FFB_IMPACT_DAMPER * profile.boostScale * fade,
-      friction: FFB_IMPACT_FRICTION * profile.boostScale * fade,
-      torque: 0,
-    };
-  }
-
-  function getTelemetryFfbTorque(motion, impactBoost, responseScale, deviceProfile) {
-    if (!motion || motion.stale) return 0;
-    const lateralMps2 = Number(motion.motion?.lateralMps2);
-    const normalizedLateral = Number.isFinite(lateralMps2)
-      ? Math.max(-1, Math.min(1, lateralMps2 / FFB_TELEMETRY_CORNER_LATERAL_FULL_MPS2))
-      : 0;
-    const cornerTorque = normalizedLateral * motion.cornerLoad
-      * FFB_TELEMETRY_CORNER_TORQUE * getFfbCornerDirectionSign(deviceProfile);
-    return Math.max(-FFB_TELEMETRY_TORQUE_MAX, Math.min(
-      FFB_TELEMETRY_TORQUE_MAX,
-      (cornerTorque + impactBoost.torque) * responseScale,
-    ));
-  }
-
-  function getFfbCornerDirectionSign(deviceProfile) {
-    if (FFB_CORNER_DIRECTION_SIGN_EXPLICIT) return FFB_CORNER_DIRECTION_SIGN;
-    const profile = typeof deviceProfile === 'object' && deviceProfile ? deviceProfile : null;
-    const profileId = profile
-      ? String(profile.id || '').toLowerCase()
-      : String(deviceProfile || '').toLowerCase();
-    const torquePolarity = Number(profile?.torquePolarity);
-    // Bridge 側でトルク極性を反転するプロファイルでは、反操舵を保つため
-    // Viewer 側の横G反トルクも反転して、手動テストと同じ座標系にそろえる。
-    if (Number.isFinite(torquePolarity) && torquePolarity < 0) {
-      return -FFB_CORNER_DIRECTION_SIGN;
-    }
-    // 旧 Bridge がプロファイル名だけを返す場合の T300 互換。
-    return profileId === 'thrustmaster-t300'
-      ? -FFB_CORNER_DIRECTION_SIGN
-      : FFB_CORNER_DIRECTION_SIGN;
+    ffbForceActive = sent;
   }
 
   function stopFfbOutput() {
     ffbOutputEnabled = false;
     ffbForceActive = false;
-    ffbSpeedProxy = 0;
-    ffbSpeedProxyAt = performance.now();
-    ffbFrontLoad = 0;
-    ffbFrontLoadAt = performance.now();
-    ffbSurfaceRoughness = 0;
     ffbClient?.stopAll();
   }
 
@@ -2687,7 +2513,7 @@
     if (next === activeFfbPreset) return;
     activeFfbPreset = next;
     updateFfbPresetControls();
-    sendFfbSteering();
+    sendFfbState();
     recordEvent('ffb preset', `${next} via ${source}`);
   }
 
@@ -2707,7 +2533,7 @@
       url: FFB_BRIDGE_URL,
       onState: updateFfbState,
     });
-    ffbSendTimer = window.setInterval(sendFfbSteering, FFB_SEND_INTERVAL_MS);
+    ffbSendTimer = window.setInterval(sendFfbState, FFB_SEND_INTERVAL_MS);
     ffbClient.connect();
   }
 
@@ -2947,35 +2773,19 @@
   }
 
   function applyConfirmedVehicleEvent(event) {
-    latestConfirmedImpact = { ...event, receivedAtMs: performance.now() };
-    sendFfbSteering();
+    sendFfbState();
     updateMotionEventHud(event);
     if (!ffbClient || !ffbOutputEnabled || !rcDriveEnabled) return;
-    const pulse = getImpactPulseRequest(event, getMotionSnapshot());
-    if (pulse) ffbClient.triggerImpactPulse(pulse);
-  }
-
-  function getImpactPulseRequest(event, motion) {
-    const impactClass = String(event?.impactClass || '').toLowerCase();
-    const profile = FFB_IMPACT_PROFILES[impactClass];
-    if (!profile) return null;
+    const motion = getMotionSnapshot();
     const eventLateralAxis = Number(event.axis?.[1]);
     const measuredLateral = Number(motion?.motion?.lateralMps2);
-    const lateral = Number.isFinite(eventLateralAxis)
-      && Math.abs(eventLateralAxis) >= FFB_IMPACT_DIRECTION_MIN_AXIS
-      ? eventLateralAxis
-      : measuredLateral;
-    const direction = Number.isFinite(lateral) && Math.abs(lateral) >= FFB_IMPACT_DIRECTION_MIN_AXIS
-      ? Math.sign(lateral) * FFB_DIRECTION_SIGN
-      : 0;
-    return {
-      kind: profile.pulseKind === 'impact'
-        ? direction === 0 ? 'frontalImpact' : 'sideImpact'
-        : profile.pulseKind,
-      strength: Math.min(1, FFB_IMPACT_TORQUE * profile.pulseScale
-        * FFB_PRESETS[activeFfbPreset].scale * FFB_RESPONSE_SCALE),
-      direction,
-    };
+    ffbClient.triggerVehicleImpact({
+      impactClass: String(event?.impactClass || '').toLowerCase(),
+      preset: activeFfbPreset,
+      lateralAxis: Number.isFinite(eventLateralAxis) ? eventLateralAxis : null,
+      measuredLateralMps2: Number.isFinite(measuredLateral) ? measuredLateral : null,
+      directionSign: FFB_DIRECTION_SIGN,
+    });
   }
 
   function updateMotionUi(motion = getMotionSnapshot()) {
@@ -3091,7 +2901,7 @@
       mode,
     };
 		updateVehicleHealthUi(Number.isFinite(previousHp) && vehicleHealth.hp < previousHp);
-    sendFfbSteering();
+    sendFfbState();
   }
 
   function applyVehicleGameplay(message) {
@@ -3133,7 +2943,7 @@
 		}
 		updateGearUi();
 		updateVehicleHealthUi(Number.isFinite(previousHp) && hp < previousHp);
-		sendFfbSteering();
+		sendFfbState();
 	}
 
 	function setVehicleResourceLevel(fill, value) {
@@ -3320,20 +3130,6 @@
     if (hp < 35) return 'critical';
     if (hp < 70) return 'damaged';
     return 'healthy';
-  }
-
-  function getDamageFfbEffect(nowMs, responseScale) {
-    const hp = Number(vehicleHealth?.hp);
-    if (!Number.isFinite(hp) || hp >= 35) {
-      return { damper: 0, friction: 0, torque: 0 };
-    }
-    const severity = Math.max(0, Math.min(1, (35 - hp) / 35));
-    // 実車の操舵値は変えない。壊れた状態だけホイールへ小さな周期抵抗を返す。
-    return {
-      damper: 0.16 * severity * responseScale,
-      friction: 0.20 * severity * responseScale,
-      torque: Math.sin(nowMs * 0.045) * FFB_DAMAGE_RATTLE_TORQUE * severity * responseScale,
-    };
   }
 
   function handleDcPong(message) {
@@ -3752,7 +3548,7 @@
     }
     updateRcUi();
     updateControlUiMode();
-    sendFfbSteering();
+    sendFfbState();
     if (window.fpvCpuShadowCapture?.running === true) {
       dispatchShadowCaptureEvent('drive', {
         event: 'local_state_changed',
@@ -4178,9 +3974,61 @@
     return roomLease?.token || '';
   }
 
+  function loadStoredRoomLease() {
+    if (!roomLockActive()) return null;
+    try {
+      const raw = window.sessionStorage?.getItem(ROOM_LEASE_STORAGE_KEY);
+      const stored = raw ? JSON.parse(raw) : null;
+      const valid = stored && stored.schemaVersion === 1
+        && stored.lockUrl === ROOM_LOCK_URL
+        && stored.roomId === AYAME_ROOM_ID
+        && stored.clientId === AYAME_CLIENT_ID
+        && typeof stored.token === 'string' && stored.token.length > 0
+        && Number(stored.expiresAt) > Date.now() / 1000;
+      if (valid) return stored;
+      window.sessionStorage?.removeItem(ROOM_LEASE_STORAGE_KEY);
+    } catch (_) {
+    }
+    return null;
+  }
+
+  function persistRoomLease() {
+    if (!roomLease?.token) return;
+    try {
+      window.sessionStorage?.setItem(ROOM_LEASE_STORAGE_KEY, JSON.stringify({
+        schemaVersion: 1,
+        lockUrl: ROOM_LOCK_URL,
+        roomId: AYAME_ROOM_ID,
+        clientId: AYAME_CLIENT_ID,
+        token: roomLease.token,
+        authenticated: roomLease.authenticated === true,
+        createdAt: roomLease.createdAt,
+        updatedAt: roomLease.updatedAt,
+        expiresAt: roomLease.expiresAt,
+        ttlSec: roomLease.ttlSec || ROOM_LOCK_TTL_SEC,
+      }));
+    } catch (_) {
+    }
+  }
+
+  function clearStoredRoomLease() {
+    try {
+      window.sessionStorage?.removeItem(ROOM_LEASE_STORAGE_KEY);
+    } catch (_) {
+    }
+  }
+
+  function markRoomLeaseAuthenticated() {
+    if (!roomLease) return;
+    roomLease.authenticated = true;
+    persistRoomLease();
+  }
+
   function getAyameAuthnMetadata() {
     const metadata = { role: 'pilot' };
-    if (pilotSessionTicket) {
+    if (roomLease?.authenticated && getRoomLeaseToken()) {
+      metadata.leaseToken = getRoomLeaseToken();
+    } else if (pilotSessionTicket) {
       metadata.pilotTicket = pilotSessionTicket;
     } else if (getRoomLeaseToken()) {
       metadata.leaseToken = getRoomLeaseToken();
@@ -4275,13 +4123,12 @@
   }
 
   function clearRoomLease(reason) {
-    if (!roomLease) {
-      return;
-    }
+    const hadLease = Boolean(roomLease);
     stopRoomLockHeartbeat();
     roomLease = null;
+    clearStoredRoomLease();
     roomLockHeartbeatFailures = 0;
-    recordEvent('room lease cleared', reason);
+    if (hadLease) recordEvent('room lease cleared', reason);
   }
 
   async function heartbeatRoomLease() {
@@ -4305,6 +4152,7 @@
       }
       const token = getRoomLeaseToken();
       roomLease = payload.lease ? { ...payload.lease, token } : roomLease;
+      persistRoomLease();
       roomLockStatus = payload;
       roomLockHeartbeatFailures = 0;
       return true;
@@ -4317,9 +4165,7 @@
       roomLockHeartbeatFailures += 1;
       if (isConnectionActive()) {
         if (error.status === 409) {
-          stopRoomLockHeartbeat();
-          roomLease = null;
-          roomLockHeartbeatFailures = 0;
+          clearRoomLease('heartbeat mismatch');
           recordEvent('room lease recover', 'heartbeat mismatch');
           acquireRoomLease();
         }
@@ -4344,13 +4190,8 @@
     if (!roomLockActive()) {
       return true;
     }
-    if (roomLease) {
-      const valid = await heartbeatRoomLease();
-      if (valid) {
-        startRoomLockHeartbeat();
-        return true;
-      }
-    }
+    if (!roomLease) roomLease = loadStoredRoomLease();
+    const resumeToken = getRoomLeaseToken();
 
     roomLockBusy = true;
     recordEvent('room lock', 'acquire');
@@ -4366,15 +4207,21 @@
           userAgent: navigator.userAgent,
           driveEnabled: rcDriveEnabled,
           ticket: pilotSessionTicket,
+          leaseToken: resumeToken,
         }),
       });
       roomLease = payload.lease || null;
+      persistRoomLease();
+      if (roomLease?.authenticated) clearPilotSessionTicket();
       roomLockStatus = payload;
       roomLockHeartbeatFailures = 0;
       startRoomLockHeartbeat();
       recordEvent('room lock', 'acquired');
       return true;
     } catch (error) {
+      if (resumeToken && (error.status === 401 || error.status === 409)) {
+        clearRoomLease(error.message || 'lease resume failed');
+      }
       roomLockStatus = error.payload || { ok: false, locked: true, error: error.message || String(error) };
       const holder = roomLockStatus.lease?.clientId || 'other';
       recordEvent('room lock denied', holder);
@@ -4396,6 +4243,7 @@
     const url = roomLockEndpoint('/release');
     stopRoomLockHeartbeat();
     roomLease = null;
+    clearStoredRoomLease();
     roomLockStatus = null;
 
     if (options.beacon && navigator.sendBeacon) {
@@ -4413,6 +4261,23 @@
     }).catch((error) => {
       recordEvent('room release failed', error.message || String(error));
     });
+  }
+
+  function preserveRoomLeaseForPageHide() {
+    if (!roomLockActive() || !roomLease) return;
+    const token = getRoomLeaseToken();
+    stopRoomLockHeartbeat();
+    roomLease.driveEnabled = false;
+    persistRoomLease();
+    if (!navigator.sendBeacon) return;
+    const payload = {
+      clientId: AYAME_CLIENT_ID,
+      token,
+      ttlSec: ROOM_LOCK_TTL_SEC,
+      driveEnabled: false,
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    navigator.sendBeacon(roomLockEndpoint('/heartbeat'), blob);
   }
 
   function closeTransport(options = {}) {
@@ -4467,10 +4332,11 @@
     }
 
     if (sendSignalingClose &&
+        !isAyameSignaling() &&
         currentWs &&
         currentWs.readyState === WebSocket.OPEN) {
       try {
-        currentWs.send(JSON.stringify({ type: isAyameSignaling() ? 'bye' : 'close' }));
+        currentWs.send(JSON.stringify({ type: 'close' }));
       } catch (_) {
       }
     }
@@ -4582,7 +4448,7 @@
       sendSignalingClose: true,
       captureReason: 'page_hidden',
     });
-    releaseRoomLease({ beacon: true });
+    preserveRoomLeaseForPageHide();
   }
 
   function scheduleReconnect(reason, options = {}) {
@@ -4821,6 +4687,7 @@
     switch (message.type) {
       case 'accept':
         ayameIceServers = normalizeIceServers(message.iceServers);
+        markRoomLeaseAuthenticated();
         clearPilotSessionTicket();
         recordEvent('ayame accept', message.isExistUser ? 'peer exists' : 'waiting');
         if (message.isExistUser || typeof message.isExistUser === 'undefined') {
@@ -5995,6 +5862,11 @@
 
   function openInputSetup() {
     setDriveEnabled(false);
+    if (roomLockActive() && (!roomLease || roomLease.authenticated !== true)) {
+      recordEvent('input setup blocked', 'room lease is not authenticated');
+      updateUiState();
+      return;
+    }
     // Relay 配布版は pilot.html と gamepad.html が同じ階層、GitHub Pages 正本は
     // variants/relay/pilot.html からリポジトリ直下の gamepad.html を参照する。
     const inputSetupPath = /\/variants\/relay\/pilot\.html$/i.test(location.pathname)
@@ -6007,9 +5879,18 @@
     }
     url.searchParams.set('viewer', 'relay-pilot');
     url.searchParams.set('relayPilotPath', 'flat');
-    // Ayame 接続など、現在の Pilot URL の接続パラメータを設定画面から戻す時にも維持する。
-    url.searchParams.set('returnUrl', location.href);
-    window.open(url.toString(), '_blank', 'noopener');
+    const returnUrl = new URL(location.href);
+    returnUrl.searchParams.delete('pilotTicket');
+    returnUrl.searchParams.delete('sessionTicket');
+    if (returnUrl.hash.length > 1) {
+      const hashParams = new URLSearchParams(returnUrl.hash.slice(1));
+      hashParams.delete('pilotTicket');
+      hashParams.delete('sessionTicket');
+      const nextHash = hashParams.toString();
+      returnUrl.hash = nextHash ? `#${nextHash}` : '';
+    }
+    url.searchParams.set('returnUrl', returnUrl.toString());
+    window.location.assign(url.toString());
   }
 
   function setElementHidden(element, hidden) {
@@ -6222,9 +6103,6 @@
       ffb: {
         enabled: FFB_ENABLED,
         activePreset: activeFfbPreset,
-        speedProxy: ffbSpeedProxy,
-        frontLoad: ffbFrontLoad,
-        surfaceRoughness: ffbSurfaceRoughness,
         bridge: ffbClient?.snapshot?.() || null,
       },
     }),
