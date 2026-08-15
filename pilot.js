@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const PILOT_BUILD_ID = '20260815-ffb-default-v1';
+  const PILOT_BUILD_ID = '20260816-esc-telemetry-v1';
   const DEFAULT_HOST = '192.168.11.3:8080';
   const RECONNECT_BASE_DELAY_MS = 500;
   const RECONNECT_MAX_DELAY_MS = 5000;
@@ -421,6 +421,7 @@
     ? new window.FpvTelemetry.RelayEventInbox()
     : null;
   let latestMotion = null;
+  let latestEsc = null;
   let vehicleHealth = null;
 	let vehicleGameplay = null;
 	let vehiclePitPresence = null;
@@ -2817,6 +2818,13 @@
   }
 
   function getTelemetryStatus() {
+    const esc = latestEsc?.state?.esc;
+    if (esc) {
+      const rpm = Number.isInteger(esc.rpm) ? esc.rpm : '--';
+      const voltage = Number.isFinite(esc.v) ? esc.v.toFixed(2) : '--';
+      const temperature = Number.isFinite(esc.tc) ? esc.tc.toFixed(0) : '--';
+      return `ESC ${rpm}RPM ${voltage}V ${temperature}C${latestEsc.stale ? ' STALE' : ''}`;
+    }
     return lastTelemetry;
   }
 
@@ -2933,6 +2941,7 @@
     const telemetryResult = telemetryTracker?.ingest(message, arrivalMs);
     if (telemetryResult?.accepted) {
       latestMotion = motionExtractor?.ingest(telemetryResult.payload, arrivalMs) || latestMotion;
+      latestEsc = telemetryTracker.getSnapshot(arrivalMs).primaryEsc || latestEsc;
     }
     const motion = getMotionSnapshot();
     updateMotionUi(motion);
