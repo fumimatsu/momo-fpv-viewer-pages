@@ -729,6 +729,16 @@
       display: block;
     }
 
+    .race-milestone[data-kind="safety"] {
+      border-color: #ff645f;
+      background: rgba(91, 13, 11, 0.94);
+      box-shadow: 0 10px 38px rgba(0, 0, 0, 0.58), 0 0 30px rgba(255, 74, 69, 0.32);
+    }
+
+    .race-milestone[data-kind="safety"] output {
+      color: #ffb0ac;
+    }
+
     @keyframes rear-attention-warning {
       50% { filter: brightness(1.55); }
     }
@@ -2105,6 +2115,10 @@
       animation: vehicle-resource-impact 260ms ease-out 2;
     }
 
+    .vehicle-resource-row.is-notifying {
+      animation: vehicle-resource-notification 280ms ease-out 5;
+    }
+
     @keyframes vehicle-resource-ready {
       from { filter: brightness(1.05) drop-shadow(0 0 3px rgba(77, 229, 255, 0.58)); }
       to { filter: brightness(1.65) drop-shadow(0 0 10px rgba(77, 229, 255, 0.95)); }
@@ -2133,6 +2147,11 @@
     @keyframes vehicle-resource-impact {
       0%, 100% { filter: brightness(1); }
       45% { filter: brightness(1.8); }
+    }
+
+    @keyframes vehicle-resource-notification {
+      0%, 100% { filter: brightness(1); transform: translateY(0) scale(1); }
+      45% { filter: brightness(1.85); transform: translateY(-1px) scale(1.025); }
     }
 
     @keyframes vehicle-resource-service {
@@ -4480,15 +4499,17 @@
     </section>
   </section>
 
-    <script src="./telemetry.js?v=20260816-race-milestone-v1"></script>
-    <script src="./m5-audio.js?v=20260816-race-milestone-v1"></script>
+    <script src="./telemetry.js?v=20260816-race-audio-speed-ffb-v4"></script>
+    <script src="./m5-audio.js?v=20260816-race-audio-speed-ffb-v4"></script>
     <script
-      src="./gamepad-profile.js?v=20260816-race-milestone-v1"
-      onerror="this.onerror=null;this.src='../../gamepad-profile.js?v=20260816-race-milestone-v1'"
+      src="./gamepad-profile.js?v=20260816-race-audio-speed-ffb-v4"
+      onerror="this.onerror=null;this.src='../../gamepad-profile.js?v=20260816-race-audio-speed-ffb-v4'"
     ></script>
-    <script src="./ffb-bridge.js?v=20260816-race-milestone-v1"></script>
-    <script src="./race-battle.js?v=20260816-race-milestone-v1"></script>
-    <script src="./pilot.js?v=20260816-race-milestone-v1"></script>
+    <script src="./ffb-bridge.js?v=20260816-race-audio-speed-ffb-v4"></script>
+    <script src="./race-battle.js?v=20260816-race-audio-speed-ffb-v4"></script>
+    <script src="./notification-controller.js?v=20260816-race-audio-speed-ffb-v4"></script>
+    <script src="./race-announcer.js?v=20260816-race-audio-speed-ffb-v4"></script>
+    <script src="./pilot.js?v=20260816-race-audio-speed-ffb-v4"></script>
     <!-- fpv-diagnostic-scripts -->
 </body>
 </html>

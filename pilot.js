@@ -1,7 +1,25 @@
 (() => {
   'use strict';
 
-  const PILOT_BUILD_ID = '20260816-race-milestone-v1';
+  const PILOT_BUILD_ID = '20260816-race-audio-speed-ffb-v4';
+  const notificationModule = window.MomoNotificationController;
+  if (!notificationModule?.createNotificationController || !notificationModule?.PRIORITIES) {
+    throw new Error('MomoNotificationController is required.');
+  }
+  const NOTIFICATION_PRIORITIES = notificationModule.PRIORITIES;
+  const raceAnnouncer = window.MomoRaceAnnouncer;
+  if (!raceAnnouncer?.buildLapAnnouncement || !raceAnnouncer?.selectPreferredVoice || !raceAnnouncer?.playSignal) {
+    throw new Error('MomoRaceAnnouncer is required.');
+  }
+  const NOTIFICATION_GROUPS = Object.freeze({
+    ATTENTION: 'race-attention',
+    RESULT: 'race-result',
+    LAP: 'race-lap',
+    PIT: 'race-pit',
+    DAMAGE: 'vehicle-damage',
+    BOOST: 'vehicle-boost',
+    SAFETY: 'race-safety',
+  });
   const DEFAULT_HOST = '192.168.11.3:8080';
   const RECONNECT_BASE_DELAY_MS = 500;
   const RECONNECT_MAX_DELAY_MS = 5000;
@@ -221,6 +239,8 @@
       overallGearRatio: 5.733,
       rpmKind: 'mechanical_provisional',
       motorPolePairs: 1,
+      ffbSpeedFullKph: 30,
+      speedConfidence: 0.65,
     }),
   });
   const VEHICLE_SPEED_PROFILE_BY_DEVICE = Object.freeze({
@@ -255,17 +275,25 @@
   const VEHICLE_RPM_TO_KPH = Math.max(0, getNumberParamAllowZero('rpmToKph', 0));
   const VEHICLE_SPEED_PROFILE_READY = VEHICLE_RPM_TO_KPH > 0
     || (VEHICLE_TIRE_ROLLOUT_MM > 0 && VEHICLE_OVERALL_GEAR_RATIO > 0);
+  const VEHICLE_FFB_SPEED_FULL_KPH = Math.max(
+    1,
+    getNumberParam('ffbSpeedFullKph', VEHICLE_SPEED_DEFAULT_PROFILE?.ffbSpeedFullKph || 30),
+  );
+  const VEHICLE_SPEED_CONFIDENCE = Math.max(
+    0,
+    Math.min(1, getNumberParam('speedConfidence', VEHICLE_SPEED_DEFAULT_PROFILE?.speedConfidence || 0.5)),
+  );
   const RACE_BATTLE_MIN_OFFSET_PX = 30;
   const RACE_BATTLE_MAX_OFFSET_PX = 80;
-  const RACE_ANNOUNCE_ENABLED = getBooleanParam('raceAnnounce', false);
-  const RACE_ANNOUNCE_LANGUAGE = getStringParam('raceAnnounceLang', 'ja-JP');
+  const RACE_ANNOUNCE_ENABLED = getBooleanParam('raceAnnounce', true);
+  const RACE_ANNOUNCE_LANGUAGE = getStringParam('raceAnnounceLang', 'en-US');
   const RACE_ANNOUNCE_VOICE = getStringParam('raceAnnounceVoice', '');
-  const RACE_ANNOUNCE_RATE = Math.max(0.5, Math.min(2.5, getNumberParam('raceAnnounceRate', 1.1)));
-  const RACE_ANNOUNCE_VOLUME = Math.max(0, Math.min(1, getNumberParamAllowZero('raceAnnounceVolume', 0.9)));
-  const RACE_SIGNAL_SOUND_ENABLED = getBooleanParam('raceSignalSound', RACE_ANNOUNCE_ENABLED);
+  const RACE_ANNOUNCE_RATE = Math.max(0.5, Math.min(2.5, getNumberParam('raceAnnounceRate', 1.04)));
+  const RACE_ANNOUNCE_VOLUME = Math.max(0, Math.min(1, getNumberParamAllowZero('raceAnnounceVolume', 0.95)));
+  const RACE_SIGNAL_SOUND_ENABLED = getBooleanParam('raceSignalSound', true);
   const RACE_SIGNAL_SOUND_VOLUME = Math.max(
     0,
-    Math.min(1, getNumberParamAllowZero('raceSignalSoundVolume', 0.22)),
+    Math.min(1, getNumberParamAllowZero('raceSignalSoundVolume', 0.35)),
   );
 
   const remoteVideo = document.getElementById('remote_video');
@@ -396,7 +424,7 @@
   let ffbShuttingDown = false;
   let ffbNativeProtocolWarningShown = false;
   let lastMotionEventHudId = '';
-  let motionEventFlashTimer = 0;
+  let gameplayNotificationSequence = 0;
   let cursorHideTimer = 0;
   let activeFfbPreset = FFB_INITIAL_PRESET;
   const driveHud = document.getElementById('driveHud');
@@ -585,10 +613,10 @@
   const raceCourseMarkerNodes = new Map();
   let lastRaceLapAnnouncementKey = '';
   let lastRaceMilestoneKey = '';
-  let raceMilestoneTimer = 0;
   let raceSignalAudioContext = null;
   let raceSignalSoundUnlocked = false;
   let lastRaceSignalSoundKey = '';
+  let selectedRaceAnnouncementVoiceName = '';
   const receivedRaceLapHistory = new Map();
   const rearAttentionTracker = window.MomoRaceBattle?.createRearAttentionTracker({
     warningGapMs: RACE_REAR_WARNING_GAP_MS,
@@ -601,6 +629,10 @@
     warningGapMs: RACE_BLUE_FLAG_WARNING_GAP_MS,
     releaseGapMs: RACE_BLUE_FLAG_RELEASE_GAP_MS,
   }) || null;
+  const notificationController = notificationModule.createNotificationController({
+    now: () => performance.now(),
+    onChange: renderActiveNotification,
+  });
   const raceState = {
     phase: 'STANDBY',
     phaseCode: 'idle',
@@ -1625,20 +1657,85 @@
     renderRaceCourseMap();
   }
 
-  function hideRearAttention(resetTracker = false) {
-    const wasVisible = Boolean(rearAttention && !rearAttention.hidden);
-    if (rearAttention) {
-      rearAttention.hidden = true;
-      rearAttention.classList.remove('is-active');
+  function hideRearAttentionPresentation() {
+    if (!rearAttention) return false;
+    const wasVisible = !rearAttention.hidden;
+    rearAttention.hidden = true;
+    rearAttention.classList.remove('is-active');
+    return wasVisible;
+  }
+
+  function hideRaceMilestonePresentation() {
+    if (!raceMilestone) return false;
+    const wasVisible = !raceMilestone.hidden;
+    raceMilestone.hidden = true;
+    raceMilestone.classList.remove('is-active');
+    return wasVisible;
+  }
+
+  function hidePitStopwatchPresentation() {
+    if (!pitStopwatch) return false;
+    const wasVisible = !pitStopwatch.hidden;
+    pitStopwatch.hidden = true;
+    return wasVisible;
+  }
+
+  function clearGameplayNotificationPresentation() {
+    motionEventHud?.classList.remove('is-flashing');
+    if (motionEventHud) motionEventHud.dataset.impactClass = '';
+    motionEventIndicators.forEach((indicator) => indicator.classList.remove('is-active'));
+    vehicleResourceHp?.classList.remove('is-impacting');
+    vehicleResourceBoost?.classList.remove('is-notifying');
+  }
+
+  function renderActiveNotification(active) {
+    const layoutChanged = [
+      hideRearAttentionPresentation(),
+      hideRaceMilestonePresentation(),
+      hidePitStopwatchPresentation(),
+    ].some(Boolean);
+    clearGameplayNotificationPresentation();
+    const kind = active?.payload?.kind;
+    switch (kind) {
+      case 'rear-attention':
+        renderRearAttention(active.payload.state);
+        break;
+      case 'blue-flag':
+        renderBlueFlag(active.payload.state);
+        break;
+      case 'safety':
+        renderRaceSafetyMilestone(active.payload);
+        break;
+      case 'goal':
+        renderRaceGoalMilestone(active.payload);
+        break;
+      case 'lap':
+        renderRaceLapMilestone(active.payload.announcement);
+        break;
+      case 'pit':
+        renderPitStopwatch();
+        break;
+      case 'damage':
+        renderDamageNotification(active.payload);
+        break;
+      case 'boost':
+        renderBoostNotification(active.payload);
+        break;
+      default:
+        break;
     }
+    if (layoutChanged || kind) scheduleRaceBattleLayout();
+  }
+
+  function hideRearAttention(resetTracker = false) {
+    notificationController.clearGroup(NOTIFICATION_GROUPS.ATTENTION);
     if (resetTracker) {
       rearAttentionTracker?.reset();
       blueFlagTracker?.reset();
     }
-    if (wasVisible) scheduleRaceBattleLayout();
   }
 
-  function showRearAttention(state) {
+  function renderRearAttention(state) {
     if (!rearAttention || !state?.active) {
       return;
     }
@@ -1672,7 +1769,19 @@
     }
   }
 
-  function showBlueFlag(state) {
+  function showRearAttention(state) {
+    if (!state?.active) return;
+    notificationController.publish({
+      id: 'rear-attention',
+      group: NOTIFICATION_GROUPS.ATTENTION,
+      priority: NOTIFICATION_PRIORITIES.SAFETY,
+      persistent: true,
+      replaceGroup: true,
+      payload: { kind: 'rear-attention', state },
+    });
+  }
+
+  function renderBlueFlag(state) {
     if (!rearAttention || !state?.active) {
       return;
     }
@@ -1696,26 +1805,23 @@
     }
   }
 
-  function clearRaceMilestoneTimer() {
-    if (!raceMilestoneTimer) {
-      return;
-    }
-    window.clearTimeout(raceMilestoneTimer);
-    raceMilestoneTimer = 0;
+  function showBlueFlag(state) {
+    if (!state?.active) return;
+    notificationController.publish({
+      id: 'blue-flag',
+      group: NOTIFICATION_GROUPS.ATTENTION,
+      priority: NOTIFICATION_PRIORITIES.BLUE_FLAG,
+      persistent: true,
+      replaceGroup: true,
+      payload: { kind: 'blue-flag', state },
+    });
   }
 
   function hideRaceMilestone(resetKey = false) {
-    clearRaceMilestoneTimer();
-    const wasVisible = Boolean(raceMilestone && !raceMilestone.hidden);
-    if (raceMilestone) {
-      raceMilestone.hidden = true;
-      raceMilestone.classList.remove('is-active');
-    }
+    notificationController.clearGroup(NOTIFICATION_GROUPS.LAP);
+    notificationController.clearGroup(NOTIFICATION_GROUPS.RESULT);
     if (resetKey) {
       lastRaceMilestoneKey = '';
-    }
-    if (wasVisible) {
-      scheduleRaceBattleLayout();
     }
   }
 
@@ -1757,12 +1863,10 @@
     return `${integer}${suffix}`;
   }
 
-  function showRaceLapMilestone(announcement) {
+  function renderRaceLapMilestone(announcement) {
     if (!raceMilestone || !announcement) {
       return;
     }
-    clearRaceMilestoneTimer();
-    lastRaceMilestoneKey = announcement.key;
     const result = announcement.isOverallBest
       ? 'overall-best'
       : announcement.isBestLap ? 'personal-best' : 'normal';
@@ -1780,7 +1884,19 @@
     raceMilestone.hidden = false;
     animateRaceMilestone();
     scheduleRaceBattleLayout();
-    raceMilestoneTimer = window.setTimeout(() => hideRaceMilestone(false), RACE_MILESTONE_LAP_MS);
+  }
+
+  function showRaceLapMilestone(announcement) {
+    if (!announcement) return;
+    lastRaceMilestoneKey = announcement.key;
+    notificationController.publish({
+      id: `lap:${announcement.key}`,
+      group: NOTIFICATION_GROUPS.LAP,
+      priority: NOTIFICATION_PRIORITIES.LAP,
+      durationMs: RACE_MILESTONE_LAP_MS,
+      replaceGroup: true,
+      payload: { kind: 'lap', announcement },
+    });
   }
 
   function isRaceGoalState() {
@@ -1790,28 +1906,66 @@
     return raceState.phaseCode === 'finished';
   }
 
-  function showRaceGoalMilestone() {
-    if (!raceMilestone) {
-      return;
-    }
-    const key = `goal:${activeRaceRunId || 'race'}:${raceState.carId || RACE_CAR_ID || 'car'}`;
-    if (lastRaceMilestoneKey === key) {
-      return;
-    }
-    clearRaceMilestoneTimer();
-    lastRaceMilestoneKey = key;
+  function renderRaceGoalMilestone(payload) {
+    if (!raceMilestone) return;
     raceMilestone.dataset.kind = 'goal';
     raceMilestone.dataset.result = 'normal';
     setText(raceMilestoneKicker, 'CHECKERED FLAG');
     setText(raceMilestoneLabel, 'GOAL!!!');
-    setText(raceMilestoneValue, `POS ${formatRaceOrdinal(raceState.position)}`);
-    const lapLabel = raceState.lap === null ? '' : `${Math.floor(raceState.lap)} LAPS`;
-    const timeLabel = raceState.totalTimeMs === null ? '' : `TIME ${formatRaceTime(raceState.totalTimeMs)}`;
+    setText(raceMilestoneValue, `POS ${formatRaceOrdinal(payload.position)}`);
+    const lapLabel = payload.lap === null ? '' : `${Math.floor(payload.lap)} LAPS`;
+    const timeLabel = payload.totalTimeMs === null ? '' : `TIME ${formatRaceTime(payload.totalTimeMs)}`;
     setText(raceMilestoneDetail, [lapLabel, timeLabel].filter(Boolean).join('  /  ') || 'RACE FINISHED');
     raceMilestone.hidden = false;
     animateRaceMilestone();
     scheduleRaceBattleLayout();
-    raceMilestoneTimer = window.setTimeout(() => hideRaceMilestone(false), RACE_MILESTONE_GOAL_MS);
+  }
+
+  function showRaceGoalMilestone() {
+    const key = `goal:${activeRaceRunId || 'race'}:${raceState.carId || RACE_CAR_ID || 'car'}`;
+    if (lastRaceMilestoneKey === key) return;
+    lastRaceMilestoneKey = key;
+    notificationController.clearGroup(NOTIFICATION_GROUPS.LAP);
+    notificationController.publish({
+      id: key,
+      group: NOTIFICATION_GROUPS.RESULT,
+      priority: NOTIFICATION_PRIORITIES.GOAL,
+      durationMs: RACE_MILESTONE_GOAL_MS,
+      replaceGroup: true,
+      payload: {
+        kind: 'goal',
+        position: raceState.position,
+        lap: raceState.lap,
+        totalTimeMs: raceState.totalTimeMs,
+      },
+    });
+  }
+
+  function renderRaceSafetyMilestone(payload) {
+    if (!raceMilestone) return;
+    raceMilestone.dataset.kind = 'safety';
+    raceMilestone.dataset.result = 'normal';
+    setText(raceMilestoneKicker, 'RACE CONTROL');
+    setText(raceMilestoneLabel, payload.label || 'STOP');
+    setText(raceMilestoneValue, payload.value || 'HOLD');
+    setText(raceMilestoneDetail, payload.detail || 'RACE PAUSED');
+    raceMilestone.hidden = false;
+    animateRaceMilestone();
+  }
+
+  function syncRaceSafetyNotification() {
+    if (raceState.phaseCode === 'paused') {
+      notificationController.publish({
+        id: 'race-safety-stop',
+        group: NOTIFICATION_GROUPS.SAFETY,
+        priority: NOTIFICATION_PRIORITIES.STOP,
+        persistent: true,
+        replaceGroup: true,
+        payload: { kind: 'safety', label: 'STOP', value: 'HOLD', detail: 'RACE PAUSED' },
+      });
+      return;
+    }
+    notificationController.clearGroup(NOTIFICATION_GROUPS.SAFETY);
   }
 
   function syncRaceMilestone(previousAnnouncement, hadPreviousRaceState) {
@@ -2025,28 +2179,13 @@
     context.resume?.()
       .then(() => {
         raceSignalSoundUnlocked = context.state === 'running';
+        if (raceSignalSoundUnlocked) {
+          syncRaceStartSignalSound();
+        }
       })
       .catch((error) => {
         recordEvent('race signal sound unlock failed', error.message || String(error));
       });
-  }
-
-  function playRaceSignalTone(context, frequency, startAt, durationMs, volume) {
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    const duration = Math.max(0.03, durationMs / 1000);
-    const attack = 0.01;
-    const release = Math.min(0.07, duration * 0.45);
-    oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(frequency, startAt);
-    gain.gain.setValueAtTime(0, startAt);
-    gain.gain.linearRampToValueAtTime(volume, startAt + attack);
-    gain.gain.setValueAtTime(volume, Math.max(startAt + attack, startAt + duration - release));
-    gain.gain.linearRampToValueAtTime(0, startAt + duration);
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start(startAt);
-    oscillator.stop(startAt + duration + 0.02);
   }
 
   function playRaceCountdownSignalSound() {
@@ -2055,12 +2194,9 @@
       unlockRaceSignalSound();
       return false;
     }
-    const now = context.currentTime;
-    // ノート PC の小型スピーカーでも聞き取れるよう、低音に弱い倍音を重ねる。
-    playRaceSignalTone(context, 116, now, 170, RACE_SIGNAL_SOUND_VOLUME);
-    playRaceSignalTone(context, 232, now, 115, RACE_SIGNAL_SOUND_VOLUME * 0.35);
-    recordEvent('race signal sound', 'red');
-    return true;
+    const played = raceAnnouncer.playSignal(context, 'red', RACE_SIGNAL_SOUND_VOLUME);
+    if (played) recordEvent('race signal sound', 'red');
+    return played;
   }
 
   function playRaceGreenSignalSound() {
@@ -2069,11 +2205,9 @@
       unlockRaceSignalSound();
       return false;
     }
-    const now = context.currentTime;
-    playRaceSignalTone(context, 174, now, 130, RACE_SIGNAL_SOUND_VOLUME * 0.82);
-    playRaceSignalTone(context, 262, now + 0.12, 210, RACE_SIGNAL_SOUND_VOLUME);
-    recordEvent('race signal sound', 'green');
-    return true;
+    const played = raceAnnouncer.playSignal(context, 'green', RACE_SIGNAL_SOUND_VOLUME);
+    if (played) recordEvent('race signal sound', 'green');
+    return played;
   }
 
   function syncRaceStartSignalSound(suppress = false) {
@@ -2096,10 +2230,11 @@
     if (key === lastRaceSignalSoundKey) {
       return;
     }
-    lastRaceSignalSoundKey = key;
-    if (!suppress) {
-      play();
+    if (suppress) {
+      lastRaceSignalSoundKey = key;
+      return;
     }
+    if (play()) lastRaceSignalSoundKey = key;
   }
 
   function getDisplayedRaceLap(lap, lapCount) {
@@ -2275,7 +2410,11 @@
       return false;
     }
     try {
-      window.speechSynthesis.getVoices();
+      const voice = raceAnnouncer.selectPreferredVoice(window.speechSynthesis.getVoices(), {
+        language: RACE_ANNOUNCE_LANGUAGE,
+        preferredName: RACE_ANNOUNCE_VOICE,
+      });
+      selectedRaceAnnouncementVoiceName = voice?.name || '';
       return true;
     } catch (error) {
       recordEvent('race announce unavailable', error.message || String(error));
@@ -2298,19 +2437,19 @@
       return null;
     }
     const roundedLapTimeMs = Math.round(lapTimeMs);
-    const seconds = Math.floor(roundedLapTimeMs / 1000);
-    const milliseconds = String(roundedLapTimeMs % 1000).padStart(3, '0');
     const bestLapMs = normalizeRaceNumber(raceState.bestLapMs);
     const overallBestLapMs = normalizeRaceNumber(raceState.overallBestLapMs);
-    const isBestLap = bestLapMs !== null && Math.round(bestLapMs) === roundedLapTimeMs;
-    const isOverallBest = overallBestLapMs !== null && Math.round(overallBestLapMs) === roundedLapTimeMs;
-    return {
-      key: `${activeRaceRunId || 'race'}:${Math.floor(lap)}:${roundedLapTimeMs}`,
-      lap: Math.floor(lap),
+    const announcement = raceAnnouncer.buildLapAnnouncement({
+      lap,
       lapTimeMs: roundedLapTimeMs,
-      isBestLap,
-      isOverallBest,
-      text: `ラップ ${Math.floor(lap)}、${seconds}秒${milliseconds}${isBestLap ? '。ベストラップです。' : '。'}`,
+      bestLapMs,
+      overallBestLapMs,
+      position: raceState.position,
+    });
+    if (!announcement) return null;
+    return {
+      ...announcement,
+      key: `${activeRaceRunId || 'race'}:${Math.floor(lap)}:${roundedLapTimeMs}`,
     };
   }
 
@@ -2327,14 +2466,15 @@
       utterance.lang = RACE_ANNOUNCE_LANGUAGE;
       utterance.rate = RACE_ANNOUNCE_RATE;
       utterance.volume = RACE_ANNOUNCE_VOLUME;
-      if (RACE_ANNOUNCE_VOICE) {
-        const voice = window.speechSynthesis.getVoices()
-          .find((candidate) => candidate.name === RACE_ANNOUNCE_VOICE);
-        if (voice) {
-          utterance.voice = voice;
-        } else {
-          recordEvent('race announce voice unavailable', RACE_ANNOUNCE_VOICE);
-        }
+      const voice = raceAnnouncer.selectPreferredVoice(window.speechSynthesis.getVoices(), {
+        language: RACE_ANNOUNCE_LANGUAGE,
+        preferredName: RACE_ANNOUNCE_VOICE,
+      });
+      selectedRaceAnnouncementVoiceName = voice?.name || '';
+      if (voice) {
+        utterance.voice = voice;
+      } else if (RACE_ANNOUNCE_VOICE) {
+        recordEvent('race announce voice unavailable', RACE_ANNOUNCE_VOICE);
       }
       utterance.onerror = (event) => {
         if (event.error !== 'canceled' && event.error !== 'interrupted') {
@@ -2398,6 +2538,8 @@
     }
     const previousPhaseCode = raceState.phaseCode;
     if (nextState.reset === true) {
+      notificationController.clearAll();
+      pitStopwatchState = null;
       raceState.phase = 'STANDBY';
       raceState.phaseCode = 'idle';
       raceState.status = '';
@@ -2469,6 +2611,7 @@
       }
     }
     raceState.sampledAt = performance.now();
+    syncRaceSafetyNotification();
     evaluateRaceAttention();
     renderRaceHud();
     syncRaceMilestone(previousAnnouncement, hadPreviousRaceState && nextState.reset !== true);
@@ -2577,6 +2720,13 @@
       evaluateRaceAttention();
       renderRaceHud();
       showRaceGoalMilestone();
+      return;
+    }
+    if (RACE_MILESTONE_DEMO === 'safety') {
+      raceState.phase = 'PAUSED';
+      raceState.phaseCode = 'paused';
+      syncRaceSafetyNotification();
+      renderRaceHud();
     }
   }
 
@@ -2969,9 +3119,11 @@
       }
       return;
     }
-    if (!ffbClient.supportsFeature?.('vehicleDynamicsV1')) {
+    const supportsVehicleDynamics = ffbClient.supportsFeature?.('vehicleDynamicsV2')
+      || ffbClient.supportsFeature?.('vehicleDynamicsV1');
+    if (!supportsVehicleDynamics) {
       if (!ffbNativeProtocolWarningShown) {
-        console.warn('FFB Bridge must support vehicleDynamicsV1. Update the Native Bridge.');
+        console.warn('FFB Bridge must support vehicleDynamicsV1 or vehicleDynamicsV2. Update the Native Bridge.');
         ffbNativeProtocolWarningShown = true;
       }
       if (ffbForceActive) ffbClient.stopAll();
@@ -2981,11 +3133,18 @@
     ffbNativeProtocolWarningShown = false;
     const motion = getMotionSnapshot();
     const motionFresh = Boolean(motion && !motion.stale);
+    const speed = getFfbVehicleSpeedState();
     const throttle = Math.max(-1, Math.min(1, (Number(throttleInput?.value || 1500) - 1500) / 500));
     const sent = ffbClient.sendVehicleDynamics({
       enabled: true,
       preset: activeFfbPreset,
       throttle,
+      speedFresh: speed.fresh,
+      wheelSpeedKph: speed.kph,
+      speedConfidence: speed.confidence,
+      speedFullKph: VEHICLE_FFB_SPEED_FULL_KPH,
+      speedSource: speed.source,
+      vehicleProfileId: VEHICLE_SPEED_PROFILE_ID,
       baseFriction: FFB_BASE_FRICTION,
       parkingFriction: FFB_PARKING_FRICTION,
       baseDamper: FFB_BASE_DAMPER,
@@ -3183,6 +3342,24 @@
     if (VEHICLE_RPM_TO_KPH > 0) return mechanicalRpm * VEHICLE_RPM_TO_KPH;
     const wheelRpm = mechanicalRpm / VEHICLE_OVERALL_GEAR_RATIO;
     return wheelRpm * (VEHICLE_TIRE_ROLLOUT_MM / 1000) * 60 / 1000;
+  }
+
+  function getFfbVehicleSpeedState(nowMs = performance.now()) {
+    const snapshot = getCurrentEscSnapshot(nowMs);
+    const rpm = Number(snapshot?.state?.esc?.rpm);
+    const kph = estimateVehicleSpeedKph(rpm);
+    const fresh = Boolean(
+      snapshot
+      && !snapshot.stale
+      && snapshot.state?.q?.ok !== false
+      && Number.isFinite(kph),
+    );
+    return {
+      fresh,
+      kph: fresh ? Math.max(0, kph) : 0,
+      confidence: fresh ? VEHICLE_SPEED_CONFIDENCE : 0,
+      source: fresh ? 'esc-rpm' : 'unavailable',
+    };
   }
 
   function renderVehicleSpeed(snapshot, nowMs = performance.now()) {
@@ -3591,41 +3768,76 @@
     );
   }
 
-  function updateMotionEventHud(event) {
+  function renderDamageNotification(payload) {
+    vehicleResourceHp?.classList.add('is-impacting');
     if (!motionEventHud) return;
-    const impactClass = String(event?.impactClass || '').toLowerCase();
-    const eventId = String(event?.eventId || '');
-    if (!impactClass || !eventId || eventId === lastMotionEventHudId) {
-      return;
-    }
-    lastMotionEventHudId = eventId;
+    const impactClass = String(payload?.impactClass || '').toLowerCase();
+    if (!impactClass) return;
     const labels = {
       weak: 'Gravel',
       strong: 'Impact',
       severe: 'Crash',
     };
-    const flashDurations = { weak: 220, strong: 360, severe: 560 };
-    const flashMs = flashDurations[impactClass] || flashDurations.strong;
-    const activeIndicator = motionEventIndicators.find((indicator) => indicator.dataset.impactClass === impactClass);
+    const activeIndicator = motionEventIndicators.find((indicator) => (
+      indicator.dataset.impactClass === impactClass
+    ));
     motionEventIndicators.forEach((indicator) => {
       indicator.classList.toggle('is-active', indicator === activeIndicator);
     });
     motionEventHud.dataset.impactClass = impactClass;
-    motionEventHud.style.setProperty('--motion-event-flash-ms', `${flashMs}ms`);
+    motionEventHud.style.setProperty('--motion-event-flash-ms', `${payload.flashMs}ms`);
     motionEventHud.classList.remove('is-flashing');
     void motionEventHud.offsetWidth;
     motionEventHud.classList.add('is-flashing');
     if (motionEventAnnouncement) {
       setText(motionEventAnnouncement, labels[impactClass] || 'Impact');
     }
-    if (motionEventFlashTimer) window.clearTimeout(motionEventFlashTimer);
-    motionEventFlashTimer = window.setTimeout(() => {
-      if (lastMotionEventHudId !== eventId) return;
-      motionEventHud.classList.remove('is-flashing');
-      motionEventHud.dataset.impactClass = '';
-      motionEventIndicators.forEach((indicator) => indicator.classList.remove('is-active'));
-      motionEventFlashTimer = 0;
-    }, flashMs);
+  }
+
+  function publishDamageNotification(impactClass, flashMs, sourceId = '') {
+    const normalizedClass = ['weak', 'strong', 'severe'].includes(impactClass)
+      ? impactClass
+      : 'strong';
+    const durationMs = Math.max(200, Number(flashMs) || 500);
+    notificationController.publish({
+      id: `damage:${sourceId || ++gameplayNotificationSequence}`,
+      group: NOTIFICATION_GROUPS.DAMAGE,
+      priority: NOTIFICATION_PRIORITIES.GAMEPLAY,
+      durationMs,
+      replaceGroup: true,
+      payload: { kind: 'damage', impactClass: normalizedClass, flashMs: durationMs },
+    });
+  }
+
+  function renderBoostNotification() {
+    if (!vehicleResourceBoost) return;
+    vehicleResourceBoost.classList.remove('is-notifying');
+    void vehicleResourceBoost.offsetWidth;
+    vehicleResourceBoost.classList.add('is-notifying');
+  }
+
+  function publishBoostNotification(state) {
+    if (!['ready', 'active'].includes(state)) return;
+    notificationController.publish({
+      id: `boost:${state}:${++gameplayNotificationSequence}`,
+      group: NOTIFICATION_GROUPS.BOOST,
+      priority: NOTIFICATION_PRIORITIES.GAMEPLAY,
+      durationMs: state === 'ready' ? 1400 : 1000,
+      replaceGroup: true,
+      payload: { kind: 'boost', state },
+    });
+  }
+
+  function updateMotionEventHud(event) {
+    const impactClass = String(event?.impactClass || '').toLowerCase();
+    const eventId = String(event?.eventId || '');
+    if (!impactClass || !eventId || eventId === lastMotionEventHudId) {
+      return;
+    }
+    lastMotionEventHudId = eventId;
+    const flashDurations = { weak: 220, strong: 360, severe: 560 };
+    const flashMs = flashDurations[impactClass] || flashDurations.strong;
+    publishDamageNotification(impactClass, flashMs, eventId);
   }
 
   function applyVehicleHealth(message) {
@@ -3671,6 +3883,7 @@
 			return;
 		}
 		const previousHp = vehicleHealth?.hp;
+		const previousBoostState = vehicleGameplay?.boostState;
 		vehicleGameplay = {
 			...payload,
 			hp,
@@ -3687,6 +3900,9 @@
 		}
 		updateGearUi();
 		updateVehicleHealthUi(Number.isFinite(previousHp) && hp < previousHp);
+		if (previousBoostState !== payload.boostState) {
+			publishBoostNotification(payload.boostState);
+		}
 		sendFfbState();
 	}
 
@@ -3770,13 +3986,12 @@
 
 	function hidePitStopwatch() {
 		pitStopwatchState = null;
-		if (!pitStopwatch || pitStopwatch.hidden) return;
-		pitStopwatch.hidden = true;
-		scheduleRaceBattleLayout();
+		notificationController.clear('pit-stopwatch');
 	}
 
 	function renderPitStopwatch(now = performance.now()) {
-		if (!pitStopwatchState || !vehiclePitPresence?.present || !pitStopwatch || !pitStopwatchTime) {
+		if (!notificationController.isActive('pit-stopwatch')
+			|| !pitStopwatchState || !vehiclePitPresence?.present || !pitStopwatch || !pitStopwatchTime) {
 			return;
 		}
 		pitStopwatch.dataset.state = vehiclePitPresence.serviceState === 'complete' ? 'complete' : 'servicing';
@@ -3813,7 +4028,13 @@
 		} else {
 			pitStopwatchState = { entryId, baseElapsedMs: elapsedAtReceipt, sampledAt: now };
 		}
-		renderPitStopwatch(now);
+		notificationController.publish({
+			id: 'pit-stopwatch',
+			group: NOTIFICATION_GROUPS.PIT,
+			priority: NOTIFICATION_PRIORITIES.PIT,
+			persistent: true,
+			payload: { kind: 'pit' },
+		});
 	}
 
 	function applyPitPresence(message) {
@@ -3849,9 +4070,10 @@
 			limp: 'LIMP',
 		}[vehicleHealth.mode] || 'N/A');
 		if (impact) {
-			vehicleResourceHp.classList.remove('is-impacting');
-			void vehicleResourceHp.offsetWidth;
-			vehicleResourceHp.classList.add('is-impacting');
+			const impactClass = vehicleHealth.mode === 'limp'
+				? 'severe'
+				: vehicleHealth.mode === 'critical' ? 'strong' : 'weak';
+			publishDamageNotification(impactClass, 700);
 		}
 
 		if (!vehicleGameplay) {
@@ -6849,6 +7071,7 @@
         raceChannel: snapshotDataChannelForCapture(raceChannel),
         eventsChannel: snapshotDataChannelForCapture(eventsChannel),
       },
+      notifications: notificationController.getState(),
       motion: getMotionSnapshot(),
       gamepad: {
         enabled: GAMEPAD_ENABLED,
@@ -6900,7 +7123,7 @@
     testAnnouncement: () => speakRaceLapAnnouncement({
       key: 'manual-test',
       lap: 1,
-      text: 'ラップ 1、18秒320。ベストラップです。',
+      text: 'Lap 1 complete. 18.320 seconds. New personal best. Position 1.',
     }),
     testSignalSound: (signal = 'red') => {
       unlockRaceSignalSound();
@@ -6917,7 +7140,7 @@
       enabled: RACE_ANNOUNCE_ENABLED,
       supported: supportsRaceAnnouncement(),
       language: RACE_ANNOUNCE_LANGUAGE,
-      voice: RACE_ANNOUNCE_VOICE || null,
+      voice: selectedRaceAnnouncementVoiceName || RACE_ANNOUNCE_VOICE || null,
       rate: RACE_ANNOUNCE_RATE,
       volume: RACE_ANNOUNCE_VOLUME,
       lastKey: lastRaceLapAnnouncementKey || null,
@@ -6928,12 +7151,14 @@
       kind: raceMilestone?.dataset.kind || null,
       result: raceMilestone?.dataset.result || null,
     }),
+    getNotificationDiagnostics: () => notificationController.getState(),
   };
   window.addEventListener('momo-race-state', (event) => setRaceState(event.detail));
   window.addEventListener('pointerdown', unlockRaceSignalSound);
   window.addEventListener('keydown', unlockRaceSignalSound);
   window.addEventListener('pointerdown', prepareRaceAnnouncement);
   window.addEventListener('keydown', prepareRaceAnnouncement);
+  window.speechSynthesis?.addEventListener?.('voiceschanged', prepareRaceAnnouncement);
   renderRaceHud();
   startRaceBattleDemo();
   startRaceMilestoneDemo();
