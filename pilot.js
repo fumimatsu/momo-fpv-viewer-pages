@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const PILOT_BUILD_ID = '20260816-race-audio-speed-ffb-v4';
+  const PILOT_BUILD_ID = '20260816-race-audio-speed-ffb-v6';
   const notificationModule = window.MomoNotificationController;
   if (!notificationModule?.createNotificationController || !notificationModule?.PRIORITIES) {
     throw new Error('MomoNotificationController is required.');
@@ -3119,11 +3119,12 @@
       }
       return;
     }
-    const supportsVehicleDynamics = ffbClient.supportsFeature?.('vehicleDynamicsV2')
+    const supportsVehicleDynamics = ffbClient.supportsFeature?.('vehicleDynamicsV3')
+      || ffbClient.supportsFeature?.('vehicleDynamicsV2')
       || ffbClient.supportsFeature?.('vehicleDynamicsV1');
     if (!supportsVehicleDynamics) {
       if (!ffbNativeProtocolWarningShown) {
-        console.warn('FFB Bridge must support vehicleDynamicsV1 or vehicleDynamicsV2. Update the Native Bridge.');
+        console.warn('FFB Bridge must support vehicleDynamicsV1, vehicleDynamicsV2, or vehicleDynamicsV3. Update the Native Bridge.');
         ffbNativeProtocolWarningShown = true;
       }
       if (ffbForceActive) ffbClient.stopAll();
@@ -3134,17 +3135,25 @@
     const motion = getMotionSnapshot();
     const motionFresh = Boolean(motion && !motion.stale);
     const speed = getFfbVehicleSpeedState();
+    const control = getFfbControlIntent();
     const throttle = Math.max(-1, Math.min(1, (Number(throttleInput?.value || 1500) - 1500) / 500));
     const sent = ffbClient.sendVehicleDynamics({
       enabled: true,
       preset: activeFfbPreset,
       throttle,
+      propulsionIntent: control.propulsion,
+      brakeIntent: control.brake,
       speedFresh: speed.fresh,
       wheelSpeedKph: speed.kph,
       speedConfidence: speed.confidence,
       speedFullKph: VEHICLE_FFB_SPEED_FULL_KPH,
       speedSource: speed.source,
       vehicleProfileId: VEHICLE_SPEED_PROFILE_ID,
+      speedBootId: speed.bootId,
+      speedSequence: speed.sequence,
+      speedSampleTimeUs: speed.sampleTimeUs,
+      speedAgeMs: speed.ageMs,
+      speedMaxAgeMs: speed.maxAgeMs,
       baseFriction: FFB_BASE_FRICTION,
       parkingFriction: FFB_PARKING_FRICTION,
       baseDamper: FFB_BASE_DAMPER,
@@ -3344,14 +3353,36 @@
     return wheelRpm * (VEHICLE_TIRE_ROLLOUT_MM / 1000) * 60 / 1000;
   }
 
+  function getFfbControlIntent() {
+    const pulse = Number(throttleInput?.value || 1500);
+    if (!Number.isFinite(pulse)) return { propulsion: 0, brake: 0 };
+    if (pulse >= 1500) {
+      const span = Math.max(1, getThrottleGearMax() - 1500);
+      return { propulsion: Math.max(0, Math.min(1, (pulse - 1500) / span)), brake: 0 };
+    }
+    const span = Math.max(1, 1500 - getThrottleGearMin());
+    return { propulsion: 0, brake: Math.max(0, Math.min(1, (1500 - pulse) / span)) };
+  }
+
   function getFfbVehicleSpeedState(nowMs = performance.now()) {
     const snapshot = getCurrentEscSnapshot(nowMs);
     const rpm = Number(snapshot?.state?.esc?.rpm);
     const kph = estimateVehicleSpeedKph(rpm);
+    const transportAgeMs = Number.isFinite(snapshot?.lastStateAt)
+      ? Math.max(0, nowMs - snapshot.lastStateAt)
+      : Number.POSITIVE_INFINITY;
+    const sourceAgeMs = Number.isFinite(snapshot?.state?.q?.age)
+      ? Math.max(0, Number(snapshot.state.q.age))
+      : 0;
+    const ageMs = transportAgeMs + sourceAgeMs;
+    const maxAgeMs = Number.isFinite(snapshot?.staleThresholdMs)
+      ? Math.max(50, Number(snapshot.staleThresholdMs))
+      : 500;
     const fresh = Boolean(
       snapshot
       && !snapshot.stale
       && snapshot.state?.q?.ok !== false
+      && ageMs <= maxAgeMs
       && Number.isFinite(kph),
     );
     return {
@@ -3359,6 +3390,11 @@
       kph: fresh ? Math.max(0, kph) : 0,
       confidence: fresh ? VEHICLE_SPEED_CONFIDENCE : 0,
       source: fresh ? 'esc-rpm' : 'unavailable',
+      bootId: typeof snapshot?.boot === 'string' ? snapshot.boot : '',
+      sequence: Number.isInteger(snapshot?.seq) ? snapshot.seq : -1,
+      sampleTimeUs: Number.isSafeInteger(snapshot?.t_us) ? snapshot.t_us : -1,
+      ageMs: Number.isFinite(ageMs) ? ageMs : -1,
+      maxAgeMs,
     };
   }
 
@@ -3410,7 +3446,7 @@
     const shownKph = Math.max(0, displayedVehicleSpeedKph ?? targetKph);
     vehicleSpeedGauge.dataset.state = 'active';
     setText(vehicleSpeedLabel, 'EST. WHEEL SPEED');
-    setText(vehicleSpeedValue, Math.round(shownKph).toString());
+    setText(vehicleSpeedValue, shownKph.toFixed(1));
     setText(vehicleSpeedUnit, 'KM/H');
     setText(vehicleSpeedStatus, 'EST');
     vehicleSpeedGauge.setAttribute('aria-label', `Estimated wheel speed ${shownKph.toFixed(1)} kilometers per hour`);

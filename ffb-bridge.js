@@ -151,6 +151,9 @@
 
     sendVehicleDynamics(state) {
       if (!this.connected || !this.acquired) return false;
+      if (this.supportsFeature('vehicleDynamicsV3')) {
+        return this.send({ ...state, type: 'setVehicleDynamics', schemaVersion: 3 });
+      }
       if (this.supportsFeature('vehicleDynamicsV2')) {
         return this.send({ ...state, type: 'setVehicleDynamics', schemaVersion: 2 });
       }
