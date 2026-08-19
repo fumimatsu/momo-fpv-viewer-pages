@@ -847,17 +847,6 @@
     return message;
   }
 
-  function classifyLowTelemetryValue(value, warning, critical, previous = 'normal', hysteresis = 0) {
-    if (!Number.isFinite(value)) return 'unavailable';
-    if (previous === 'critical' && value < critical + hysteresis) return 'critical';
-    if (previous === 'warning' && value <= warning + hysteresis) {
-      return value < critical ? 'critical' : 'warning';
-    }
-    if (value < critical) return 'critical';
-    if (value <= warning) return 'warning';
-    return 'normal';
-  }
-
   return {
     MAX_WIRE_BYTES,
     TELEMETRY_PREFIX,
@@ -865,7 +854,6 @@
     MotionFeatureExtractor,
     RelayEventInbox,
     TelemetryTracker,
-    classifyLowTelemetryValue,
     classifySequence,
     deriveVehicleMotion,
     encodeTelemetry,
