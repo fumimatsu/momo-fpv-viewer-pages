@@ -12,6 +12,7 @@
   const RESTART_SAFETY_SECONDS = 0.03;
   const MAX_GAP_FRAMES = 12;
   const MAX_SCHEDULE_AHEAD_SECONDS = 0.6;
+  const STATE_NOTIFY_INTERVAL_MS = 250;
   // M5 のサンプリングクロックと AudioContext のクロックは完全には一致しない。
   // 到着周期とバッファ残量から再生速度を小さく補正し、長時間走行時の周期的な
   // underrun を防ぐ。補正幅は音程差が目立たない ±1.5% に制限する。
@@ -92,6 +93,8 @@
     constructor(options = {}) {
       this.onState = typeof options.onState === 'function' ? options.onState : () => {};
       this.context = null;
+      this.outputGain = null;
+      this.outputLevel = 1;
       this.enabled = false;
       this.bootId = '';
       this.lastSequence = null;
@@ -106,16 +109,18 @@
       this.lastFrameAt = 0;
       this.lastInterArrivalMs = 0;
       this.maxInterArrivalMs = 0;
+      this.lastNotifyAt = Number.NEGATIVE_INFINITY;
       this.arrivalPlaybackRate = 1;
       this.playbackRate = 1;
       this.bufferLeadSeconds = 0;
-      this.notify();
+      this.notify(true);
     }
 
     snapshot() {
       return {
         enabled: this.enabled,
         contextState: this.context?.state || 'none',
+        outputLevel: this.outputLevel,
         received: this.received,
         invalid: this.invalid,
         gaps: this.gaps,
@@ -135,7 +140,12 @@
       return `${this.enabled ? (this.context?.state || 'starting') : 'off'} rx:${this.received} gap:${this.gaps} under:${this.underruns} bad:${this.invalid}`;
     }
 
-    notify() { this.onState(this.snapshot(), this.getStatus()); }
+    notify(force = false) {
+      const now = globalThis.performance?.now?.() ?? Date.now();
+      if (!force && now - this.lastNotifyAt < STATE_NOTIFY_INTERVAL_MS) return;
+      this.lastNotifyAt = now;
+      this.onState(this.snapshot(), this.getStatus());
+    }
 
     async setEnabled(enabled) {
       if (!enabled) {
@@ -143,24 +153,45 @@
         this.pending = [];
         this.nextPlaybackTime = 0;
         this.bufferLeadSeconds = 0;
-        this.notify();
+        this.notify(true);
         return true;
       }
       const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
       if (!AudioContextCtor) return false;
       this.context = this.context || new AudioContextCtor({ sampleRate: SAMPLE_RATE });
+      if (!this.outputGain) {
+        this.outputGain = this.context.createGain();
+        this.outputGain.gain.value = this.outputLevel;
+        this.outputGain.connect(this.context.destination);
+      }
       try {
         await this.context.resume();
       } catch (_) {
-        this.notify();
+        this.notify(true);
         return false;
       }
       this.enabled = this.context.state === 'running';
       this.pending = [];
       this.nextPlaybackTime = 0;
       this.bufferLeadSeconds = 0;
-      this.notify();
+      this.notify(true);
       return this.enabled;
+    }
+
+    setOutputGain(value, rampMs = 0) {
+      this.outputLevel = clamp(Number(value) || 0, 0, 1);
+      if (!this.outputGain || !this.context) {
+        this.notify(true);
+        return;
+      }
+      const now = this.context.currentTime;
+      this.outputGain.gain.cancelScheduledValues(now);
+      this.outputGain.gain.setValueAtTime(this.outputGain.gain.value, now);
+      this.outputGain.gain.linearRampToValueAtTime(
+        this.outputLevel,
+        now + Math.max(0, Number(rampMs) || 0) / 1000,
+      );
+      this.notify(true);
     }
 
     resetArrivalClock(receivedAt) {
@@ -280,7 +311,7 @@
         source.buffer = buffer;
         const playbackRate = this.getAdaptivePlaybackRate();
         source.playbackRate.value = playbackRate;
-        source.connect(this.context.destination);
+        source.connect(this.outputGain || this.context.destination);
         source.start(startAt);
         startAt += FRAME_DURATION_SECONDS / playbackRate;
         this.nextPlaybackTime = startAt;
