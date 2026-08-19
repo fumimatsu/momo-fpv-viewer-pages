@@ -1,14 +1,24 @@
 (() => {
   'use strict';
 
-  const PILOT_BUILD_ID = '20260816-race-audio-speed-ffb-v6';
+  const PILOT_BUILD_ID = '20260819-pilot-callouts-v1';
   const notificationModule = window.MomoNotificationController;
   if (!notificationModule?.createNotificationController || !notificationModule?.PRIORITIES) {
     throw new Error('MomoNotificationController is required.');
   }
   const NOTIFICATION_PRIORITIES = notificationModule.PRIORITIES;
+  const browserKokoro = window.MomoBrowserKokoro;
+  const pilotCalloutModule = window.MomoPilotCalloutPlanner;
+  if (!pilotCalloutModule?.createPlanner) {
+    throw new Error('MomoPilotCalloutPlanner is required.');
+  }
   const raceAnnouncer = window.MomoRaceAnnouncer;
-  if (!raceAnnouncer?.buildLapAnnouncement || !raceAnnouncer?.selectPreferredVoice || !raceAnnouncer?.playSignal) {
+  if (!raceAnnouncer?.buildLapAnnouncement || !raceAnnouncer?.buildRaceSummary ||
+      !raceAnnouncer?.selectPreferredVoice ||
+			!raceAnnouncer?.playSignal || !raceAnnouncer?.normalizeRemoteLanguage ||
+			!raceAnnouncer?.buildRemotePreference || !raceAnnouncer?.buildRemoteCalloutRequest ||
+      !raceAnnouncer?.parseRemoteMessage ||
+			!raceAnnouncer?.createRemoteAudioTracker) {
     throw new Error('MomoRaceAnnouncer is required.');
   }
   const NOTIFICATION_GROUPS = Object.freeze({
@@ -39,7 +49,7 @@
   const RACE_CAR_ID = getStringParam(['carId', 'raceCarId'], '');
   const CONTROL_UI_MODE = normalizeControlUiMode(getStringParam(['controlUi'], 'auto'));
   const RC_TX_INTERVAL_MS = getNumberParam('rcTxMs', 20);
-  const RC_STEERING_THROW = getNumberParam('rcSteeringThrow', 400);
+  const RC_STEERING_THROW = getNumberParam('rcSteeringThrow', 500);
   const RC_THROTTLE_THROW = getNumberParam('rcThrottleThrow', 300);
   const RC_THROTTLE_MIN = getNumberParam('rcThrottleMin', 1300);
   const RC_BRAKE_VALUE = getNumberParam('rcBrakeValue', 1300);
@@ -184,6 +194,7 @@
   const RACE_MAP_ENABLED = getBooleanParam('raceMap', RACE_BATTLE_ENABLED);
   const RACE_MAP_DEFAULT_LAP_MS = Math.max(3000, getNumberParam('raceMapDefaultLapMs', 24000));
   const RACE_MAP_RENDER_INTERVAL_MS = 1000 / 20;
+  const RACE_LAP_HISTORY_LIMIT = 20;
   const RACE_MAP_SECTOR_BOUNDARIES = Object.freeze([0, 0.42277, 0.73115, 1]);
   const RACE_MAP_MARKER_OFFSETS = Object.freeze([[-15, -15], [15, -15], [-15, 15], [15, 15]]);
   const RACE_MAP_COLORS = Object.freeze(['green', 'yellow', 'cyan', 'red']);
@@ -203,6 +214,7 @@
   const RACE_BLUE_FLAG_ENABLED = getBooleanParam('blueFlag', true);
   const RACE_MILESTONE_LAP_MS = Math.max(1500, getNumberParam('raceMilestoneLapMs', 3000));
   const RACE_MILESTONE_GOAL_MS = Math.max(1000, getNumberParam('raceMilestoneGoalMs', 30_000));
+  const RACE_SUMMARY_DELAY_MS = Math.max(0, getNumberParamAllowZero('raceSummaryDelayMs', 10_000));
   const RACE_MILESTONE_DEMO = getStringParam(['raceMilestoneDemo'], '').trim().toLowerCase();
   const RACE_BLUE_FLAG_DEMO = getBooleanParam('blueFlagDemo', false);
   const RACE_BLUE_FLAG_WARNING_GAP_MS = Math.max(0, getNumberParam('blueFlagGapMs', 3000));
@@ -217,11 +229,11 @@
   const VEHICLE_BATTERY_CELLS = Math.max(1, Math.min(8, getIntegerParam('batteryCells', 2)));
   const VEHICLE_VOLTAGE_WARNING_V = Math.max(
     0,
-    getNumberParam('batteryWarningV', VEHICLE_BATTERY_CELLS * 3.5),
+    getNumberParam('batteryWarningV', VEHICLE_BATTERY_CELLS * 3.65),
   );
   const VEHICLE_VOLTAGE_CRITICAL_V = Math.min(
     VEHICLE_VOLTAGE_WARNING_V,
-    Math.max(0, getNumberParam('batteryCriticalV', VEHICLE_BATTERY_CELLS * 3.3)),
+    Math.max(0, getNumberParam('batteryCriticalV', VEHICLE_BATTERY_CELLS * 3.5)),
   );
   const VEHICLE_ESC_TEMP_WARNING_C = getNumberParam('escTempWarningC', 70);
   const VEHICLE_ESC_TEMP_CRITICAL_C = Math.max(
@@ -285,11 +297,30 @@
   );
   const RACE_BATTLE_MIN_OFFSET_PX = 30;
   const RACE_BATTLE_MAX_OFFSET_PX = 80;
+  function readRaceAnnouncementLanguagePreference() {
+    try {
+      return window.localStorage?.getItem('momoRaceAnnounceLanguage') || '';
+    } catch (_) {
+      return '';
+    }
+  }
   const RACE_ANNOUNCE_ENABLED = getBooleanParam('raceAnnounce', true);
-  const RACE_ANNOUNCE_LANGUAGE = getStringParam('raceAnnounceLang', 'en-US');
+  const RACE_ANNOUNCE_LANGUAGE_STORAGE_KEY = 'momoRaceAnnounceLanguage';
+  const raceAnnounceLanguageParam = getStringParam('raceAnnounceLang', 'off');
+  const hasRaceAnnounceLanguageParam = new URLSearchParams(window.location.search).has('raceAnnounceLang');
+  let raceAnnounceLanguage = raceAnnouncer.normalizeRemoteLanguage(
+    hasRaceAnnounceLanguageParam
+      ? raceAnnounceLanguageParam
+      : readRaceAnnouncementLanguagePreference() || raceAnnounceLanguageParam,
+    RACE_ANNOUNCE_ENABLED,
+  );
   const RACE_ANNOUNCE_VOICE = getStringParam('raceAnnounceVoice', '');
   const RACE_ANNOUNCE_RATE = Math.max(0.5, Math.min(2.5, getNumberParam('raceAnnounceRate', 1.04)));
   const RACE_ANNOUNCE_VOLUME = Math.max(0, Math.min(1, getNumberParamAllowZero('raceAnnounceVolume', 0.95)));
+	const RACE_RADIO_CUE_VOLUME = Math.max(
+		0,
+		Math.min(0.4, getNumberParamAllowZero('raceRadioCueVolume', 0.22)),
+	);
   const RACE_SIGNAL_SOUND_ENABLED = getBooleanParam('raceSignalSound', true);
   const RACE_SIGNAL_SOUND_VOLUME = Math.max(
     0,
@@ -297,6 +328,14 @@
   );
 
   const remoteVideo = document.getElementById('remote_video');
+	const raceRadioCueAsset = document.getElementById('raceRadioCueAsset');
+	const remoteRaceAudio = document.createElement('audio');
+	remoteRaceAudio.autoplay = true;
+	remoteRaceAudio.playsInline = true;
+	remoteRaceAudio.hidden = true;
+	remoteRaceAudio.volume = RACE_ANNOUNCE_VOLUME;
+	remoteRaceAudio.setAttribute('aria-hidden', 'true');
+	document.body.appendChild(remoteRaceAudio);
   const endpointInput = document.getElementById('endpoint');
   const dataTextInput = document.getElementById('data_text');
   const steeringInput = document.getElementById('steering');
@@ -370,6 +409,12 @@
   const raceMilestoneLabel = document.getElementById('raceMilestoneLabel');
   const raceMilestoneValue = document.getElementById('raceMilestoneValue');
   const raceMilestoneDetail = document.getElementById('raceMilestoneDetail');
+  const raceResultSummary = document.getElementById('raceResultSummary');
+  const raceResultPosition = document.getElementById('raceResultPosition');
+  const raceResultTotalTime = document.getElementById('raceResultTotalTime');
+  const raceResultBestLap = document.getElementById('raceResultBestLap');
+  const raceResultAverageLap = document.getElementById('raceResultAverageLap');
+  const raceResultCompletedLaps = document.getElementById('raceResultCompletedLaps');
   const pitStopwatch = document.getElementById('pitStopwatch');
   const pitStopwatchLabel = document.getElementById('pitStopwatchLabel');
   const pitStopwatchTime = document.getElementById('pitStopwatchTime');
@@ -381,6 +426,7 @@
   const btnAudio = document.getElementById('btnAudio');
   const btnAudioFilter = document.getElementById('btnAudioFilter');
   const btnM5Audio = document.getElementById('btnM5Audio');
+  const raceAnnounceLanguageSelect = document.getElementById('raceAnnounceLanguage');
   const btnMic = document.getElementById('btnMic');
   const micControl = btnMic?.closest('.mic-control');
   const micVolumeInput = document.getElementById('micVolume');
@@ -480,6 +526,7 @@
   let dataChannel = null;
   let telemetryChannel = null;
   let raceChannel = null;
+	let raceAudioChannel = null;
   let driveChannel = null;
   let eventsChannel = null;
   let candidates = [];
@@ -613,11 +660,34 @@
   const raceCourseMarkerNodes = new Map();
   let lastRaceLapAnnouncementKey = '';
   let lastRaceMilestoneKey = '';
+  let lastRaceGoalKey = '';
+  let lastRaceSummaryKey = '';
+  let scheduledRaceSummaryKey = '';
+  let raceSummaryTimer = null;
   let raceSignalAudioContext = null;
+	let raceRadioCueBuffer = null;
+	let raceRadioCueBufferPromise = null;
   let raceSignalSoundUnlocked = false;
   let lastRaceSignalSoundKey = '';
   let selectedRaceAnnouncementVoiceName = '';
+	let remoteRaceAudioEnabled = false;
+	let remoteRaceAudioPlaybackPromise = null;
+	let remoteRaceAudioPlaybackBlocked = '';
+	let remoteRaceAudioModes = new Set(['remote']);
+	let browserKokoroClient = null;
+	let browserKokoroState = 'idle';
+	let browserKokoroFailure = '';
+	let browserKokoroActiveSource = null;
+	let browserKokoroActiveEventId = '';
+	const remoteRaceAudioTracker = raceAnnouncer.createRemoteAudioTracker();
+  const pilotCalloutPlanner = pilotCalloutModule.createPlanner({
+    now: () => performance.now(),
+    warningGapMs: RACE_REAR_WARNING_GAP_MS,
+    criticalGapMs: RACE_REAR_CRITICAL_GAP_MS,
+    maximumGapMs: RACE_BATTLE_MAX_GAP_MS,
+  });
   const receivedRaceLapHistory = new Map();
+  let renderedRaceLapHistorySignature = '';
   const rearAttentionTracker = window.MomoRaceBattle?.createRearAttentionTracker({
     warningGapMs: RACE_REAR_WARNING_GAP_MS,
     criticalGapMs: RACE_REAR_CRITICAL_GAP_MS,
@@ -636,6 +706,7 @@
   const raceState = {
     phase: 'STANDBY',
     phaseCode: 'idle',
+    sessionType: '',
     status: '',
     carId: '',
     lap: null,
@@ -1398,6 +1469,7 @@
           ?? normalizeOptionalRaceNumber(entry.raceElapsedMs);
         return {
           carId,
+          carNumber: normalizeOptionalRaceNumber(entry.carNumber),
           driver,
           position,
           status: typeof entry.status === 'string' ? entry.status.trim().toLowerCase() : '',
@@ -1670,6 +1742,7 @@
     const wasVisible = !raceMilestone.hidden;
     raceMilestone.hidden = true;
     raceMilestone.classList.remove('is-active');
+    if (raceResultSummary) raceResultSummary.hidden = true;
     return wasVisible;
   }
 
@@ -1708,6 +1781,9 @@
         break;
       case 'goal':
         renderRaceGoalMilestone(active.payload);
+        break;
+      case 'summary':
+        renderRaceResultSummary(active.payload.summary);
         break;
       case 'lap':
         renderRaceLapMilestone(active.payload.announcement);
@@ -1754,7 +1830,10 @@
     rearAttention.dataset.severity = severity;
     rearAttention.dataset.mode = 'rear';
     setText(rearAttentionKicker, 'PROXIMITY ALERT');
-    setText(rearAttentionLabel, critical ? 'REAR ATTACK' : 'REAR PRESSURE');
+    setText(
+      rearAttentionLabel,
+      `${critical ? 'REAR ATTACK' : 'REAR PRESSURE'} · ${rivalName}`,
+    );
     setText(rearAttentionGap, formatRaceInterval(state.gapMs, null));
     setText(
       rearAttentionDetail,
@@ -1793,7 +1872,7 @@
     rearAttention.dataset.mode = 'blue-flag';
     rearAttention.dataset.severity = 'blue-flag';
     setText(rearAttentionKicker, 'RACE CONTROL');
-    setText(rearAttentionLabel, 'BLUE FLAG');
+    setText(rearAttentionLabel, `BLUE FLAG · ${rivalName}`);
     setText(rearAttentionGap, formatRaceInterval(state.gapMs, null));
     setText(rearAttentionDetail, `LET FASTER CAR PASS  /  ${rivalName}  /  ${markerLabel}`);
     rearAttention.hidden = false;
@@ -1817,11 +1896,24 @@
     });
   }
 
+  function clearRaceSummarySchedule(resetKeys = false) {
+    if (raceSummaryTimer !== null) {
+      window.clearTimeout(raceSummaryTimer);
+      raceSummaryTimer = null;
+    }
+    scheduledRaceSummaryKey = '';
+    if (resetKeys) {
+      lastRaceGoalKey = '';
+      lastRaceSummaryKey = '';
+    }
+  }
+
   function hideRaceMilestone(resetKey = false) {
     notificationController.clearGroup(NOTIFICATION_GROUPS.LAP);
     notificationController.clearGroup(NOTIFICATION_GROUPS.RESULT);
     if (resetKey) {
       lastRaceMilestoneKey = '';
+      clearRaceSummarySchedule(true);
     }
   }
 
@@ -1923,7 +2015,8 @@
 
   function showRaceGoalMilestone() {
     const key = `goal:${activeRaceRunId || 'race'}:${raceState.carId || RACE_CAR_ID || 'car'}`;
-    if (lastRaceMilestoneKey === key) return;
+    if (lastRaceGoalKey === key) return;
+    lastRaceGoalKey = key;
     lastRaceMilestoneKey = key;
     notificationController.clearGroup(NOTIFICATION_GROUPS.LAP);
     notificationController.publish({
@@ -1939,6 +2032,74 @@
         totalTimeMs: raceState.totalTimeMs,
       },
     });
+  }
+
+  function getRaceSummaryKey() {
+    return `summary:${activeRaceRunId || 'race'}:${raceState.carId || RACE_CAR_ID || 'car'}`;
+  }
+
+  function buildCurrentRaceSummary() {
+    return raceAnnouncer.buildRaceSummary({
+      sessionType: raceState.sessionType,
+      position: raceState.position,
+      fieldSize: raceState.fieldSize,
+      totalTimeMs: raceState.totalTimeMs,
+      bestLapMs: raceState.bestLapMs,
+      laps: raceState.laps,
+    });
+  }
+
+  function renderRaceResultSummary(summary) {
+    if (!raceMilestone || !raceResultSummary || !summary) return;
+    raceMilestone.dataset.kind = 'summary';
+    raceMilestone.dataset.result = 'normal';
+    setText(
+      raceResultPosition,
+      `P${summary.position ?? '--'} / ${summary.fieldSize ?? '--'}`,
+    );
+    setText(raceResultTotalTime, formatRaceTime(summary.totalTimeMs));
+    setText(raceResultBestLap, formatRaceTime(summary.bestLapMs));
+    setText(raceResultAverageLap, formatRaceTime(summary.averageLapMs));
+    setText(raceResultCompletedLaps, `${summary.completedLaps} LAPS COMPLETE`);
+    raceResultSummary.hidden = false;
+    raceMilestone.hidden = false;
+    animateRaceMilestone();
+    scheduleRaceBattleLayout();
+  }
+
+  function showRaceResultSummary(key) {
+    const summary = buildCurrentRaceSummary();
+    if (!summary || lastRaceSummaryKey === key) return;
+    lastRaceSummaryKey = key;
+    lastRaceMilestoneKey = key;
+    notificationController.publish({
+      id: key,
+      group: NOTIFICATION_GROUPS.RESULT,
+      priority: NOTIFICATION_PRIORITIES.GOAL,
+      persistent: true,
+      replaceGroup: true,
+      payload: { kind: 'summary', summary },
+    });
+  }
+
+  function scheduleRaceResultSummary() {
+    const summary = buildCurrentRaceSummary();
+    if (!summary) {
+      clearRaceSummarySchedule(false);
+      return;
+    }
+    const key = getRaceSummaryKey();
+    if (lastRaceSummaryKey === key || scheduledRaceSummaryKey === key) return;
+    clearRaceSummarySchedule(false);
+    scheduledRaceSummaryKey = key;
+    raceSummaryTimer = window.setTimeout(() => {
+      raceSummaryTimer = null;
+      scheduledRaceSummaryKey = '';
+      if (!isRaceGoalState() || raceState.sessionType !== 'race' || getRaceSummaryKey() !== key) {
+        return;
+      }
+      showRaceResultSummary(key);
+    }, RACE_SUMMARY_DELAY_MS);
   }
 
   function renderRaceSafetyMilestone(payload) {
@@ -1975,8 +2136,10 @@
     }
     if (isRaceGoalState()) {
       showRaceGoalMilestone();
+      scheduleRaceResultSummary();
       return;
     }
+    clearRaceSummarySchedule(false);
     const nextAnnouncement = getRaceLapAnnouncement();
     if (!nextAnnouncement || raceState.phaseCode !== 'green') {
       return;
@@ -2156,7 +2319,9 @@
   }
 
   function getRaceSignalAudioContext() {
-    if (!RACE_SIGNAL_SOUND_ENABLED || RACE_SIGNAL_SOUND_VOLUME <= 0) {
+    const signalEnabled = RACE_SIGNAL_SOUND_ENABLED && RACE_SIGNAL_SOUND_VOLUME > 0;
+    const radioEnabled = isRaceAnnouncementEnabled() && RACE_ANNOUNCE_VOLUME > 0;
+    if (!signalEnabled && !radioEnabled) {
       return null;
     }
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -2168,14 +2333,45 @@
     return raceSignalAudioContext;
   }
 
+	function preloadRaceRadioCueSound(context) {
+		if (raceRadioCueBuffer) {
+			return Promise.resolve(raceRadioCueBuffer);
+		}
+		if (raceRadioCueBufferPromise) {
+			return raceRadioCueBufferPromise;
+		}
+		if (!context || !raceRadioCueAsset?.href || typeof fetch !== 'function') {
+			return Promise.resolve(null);
+		}
+		raceRadioCueBufferPromise = fetch(raceRadioCueAsset.href, { cache: 'force-cache' })
+			.then((response) => {
+				if (!response.ok) {
+					throw new Error(`HTTP ${response.status}`);
+				}
+				return response.arrayBuffer();
+			})
+			.then((encoded) => context.decodeAudioData(encoded))
+			.then((buffer) => {
+				raceRadioCueBuffer = buffer;
+				return buffer;
+			})
+			.catch((error) => {
+				raceRadioCueBufferPromise = null;
+				recordEvent('race audio cue preload failed', error.message || String(error));
+				return null;
+			});
+		return raceRadioCueBufferPromise;
+	}
+
   function unlockRaceSignalSound() {
-    if (!RACE_SIGNAL_SOUND_ENABLED || raceSignalSoundUnlocked) {
+    if ((!RACE_SIGNAL_SOUND_ENABLED && !isRaceAnnouncementEnabled()) || raceSignalSoundUnlocked) {
       return;
     }
     const context = getRaceSignalAudioContext();
     if (!context) {
       return;
     }
+		preloadRaceRadioCueSound(context);
     context.resume?.()
       .then(() => {
         raceSignalSoundUnlocked = context.state === 'running';
@@ -2245,6 +2441,28 @@
     return String(lapCount === null ? currentLap : Math.min(currentLap, Math.floor(lapCount)));
   }
 
+	function playRaceRadioCueSound() {
+		const context = getRaceSignalAudioContext();
+		if (!context || context.state !== 'running') {
+			unlockRaceSignalSound();
+			return false;
+		}
+		if (!raceRadioCueBuffer || RACE_RADIO_CUE_VOLUME <= 0) {
+			preloadRaceRadioCueSound(context);
+			recordEvent('race audio cue skipped', raceRadioCueBuffer ? 'muted' : 'not ready');
+			return false;
+		}
+		const source = context.createBufferSource();
+		const gain = context.createGain();
+		source.buffer = raceRadioCueBuffer;
+		gain.gain.value = Math.min(RACE_ANNOUNCE_VOLUME, RACE_RADIO_CUE_VOLUME);
+		source.connect(gain);
+		gain.connect(context.destination);
+		source.start();
+		recordEvent('race audio cue', 'queued');
+		return true;
+	}
+
   function classifyRaceBestTime(value, personalBest, overallBest) {
     if (!Number.isFinite(value) || value <= 0) {
       return '';
@@ -2264,45 +2482,38 @@
     element?.classList.toggle('is-overall-best', className === 'is-overall-best');
   }
 
-  function renderRaceHud() {
-    const lapCount = raceState.lapCount === null ? '--' : String(raceState.lapCount);
-    const lap = getDisplayedRaceLap(raceState.lap, raceState.lapCount);
-    const position = raceState.position === null ? '--' : String(raceState.position);
-    const fieldSize = raceState.fieldSize === null ? '--' : String(raceState.fieldSize);
-    setText(racePhase, raceState.phase);
-    setText(raceLapCurrentNumber, lap);
-    setText(raceLapTotalCount, lapCount);
-    raceLapCount?.setAttribute('aria-label', `Lap ${lap} of ${lapCount}`);
+  function renderRaceClock() {
     setText(raceCurrentLap, formatRaceTime(getDisplayedRaceTime(raceState.currentLapMs)));
-    setText(raceLastLap, formatRaceTime(raceState.lastLapMs));
-    setText(raceBestLap, formatRaceTime(raceState.bestLapMs));
-    applyRaceBestTimeClass(raceBestLap, classifyRaceBestTime(
-      raceState.bestLapMs,
-      raceState.bestLapMs,
-      raceState.overallBestLapMs,
-    ));
-    setText(raceTotalTime, formatRaceTime(getDisplayedRaceTime(raceState.totalTimeMs, raceState.allTimeMode)));
+    setText(
+      raceTotalTime,
+      formatRaceTime(getDisplayedRaceTime(raceState.totalTimeMs, raceState.allTimeMode)),
+    );
     renderRaceStartSignal();
-    if (racePosition) {
-      racePosition.replaceChildren(document.createTextNode(position));
-      const total = document.createElement('em');
-      total.textContent = `/${fieldSize}`;
-      racePosition.append(total);
-      scheduleRaceBattleLayout();
-    }
-    renderRaceBattle();
+  }
+
+  function renderRaceLapHistory() {
     if (!raceLapHistory) {
       return;
     }
+    const entries = raceState.laps.slice(0, RACE_LAP_HISTORY_LIMIT);
+    const signature = JSON.stringify([
+      entries,
+      raceState.bestLapMs,
+      raceState.overallBestLapMs,
+    ]);
+    if (signature === renderedRaceLapHistorySignature) {
+      return;
+    }
+    renderedRaceLapHistorySignature = signature;
     raceLapHistory.replaceChildren();
-    if (raceState.laps.length === 0) {
+    if (entries.length === 0) {
       const empty = document.createElement('li');
       empty.className = 'is-empty';
       empty.textContent = 'WAITING FOR RACE DATA';
       raceLapHistory.append(empty);
       return;
     }
-    for (const entry of raceState.laps) {
+    for (const entry of entries) {
       const item = document.createElement('li');
       const bestClass = classifyRaceBestTime(
         entry.timeMs,
@@ -2319,6 +2530,34 @@
       item.append(label, value);
       raceLapHistory.append(item);
     }
+  }
+
+  function renderRaceHud() {
+    const lapCount = raceState.lapCount === null ? '--' : String(raceState.lapCount);
+    const lap = getDisplayedRaceLap(raceState.lap, raceState.lapCount);
+    const position = raceState.position === null ? '--' : String(raceState.position);
+    const fieldSize = raceState.fieldSize === null ? '--' : String(raceState.fieldSize);
+    setText(racePhase, raceState.phase);
+    setText(raceLapCurrentNumber, lap);
+    setText(raceLapTotalCount, lapCount);
+    raceLapCount?.setAttribute('aria-label', `Lap ${lap} of ${lapCount}`);
+    renderRaceClock();
+    setText(raceLastLap, formatRaceTime(raceState.lastLapMs));
+    setText(raceBestLap, formatRaceTime(raceState.bestLapMs));
+    applyRaceBestTimeClass(raceBestLap, classifyRaceBestTime(
+      raceState.bestLapMs,
+      raceState.bestLapMs,
+      raceState.overallBestLapMs,
+    ));
+    if (racePosition) {
+      racePosition.replaceChildren(document.createTextNode(position));
+      const total = document.createElement('em');
+      total.textContent = `/${fieldSize}`;
+      racePosition.append(total);
+      scheduleRaceBattleLayout();
+    }
+    renderRaceBattle();
+    renderRaceLapHistory();
   }
 
   function displayRacePhase(phase) {
@@ -2378,6 +2617,7 @@
       reset: isNewRun,
       phase: displayRacePhase(state.phase),
       phaseCode: normalizeRacePhaseCode(state.phase),
+      sessionType: String(state.raceInfo?.sessionType || '').trim().toLowerCase(),
       status: typeof standing?.status === 'string' ? standing.status.trim().toLowerCase() : '',
       carId,
       lap,
@@ -2405,13 +2645,283 @@
       typeof window.SpeechSynthesisUtterance === 'function';
   }
 
+	function setM5AudioDucking(level, rampMs) {
+		m5AudioPlayer?.setOutputGain?.(level, rampMs);
+	}
+
+	function getRemoteRaceAudioTrack() {
+		return remoteRaceAudio.srcObject?.getAudioTracks?.()[0] || null;
+	}
+
+	function ensureRemoteRaceAudioPlayback(reason = 'retry') {
+		const track = getRemoteRaceAudioTrack();
+		if (!track || track.readyState === 'ended') {
+			return Promise.resolve(false);
+		}
+		if (!remoteRaceAudio.paused) {
+			remoteRaceAudioPlaybackBlocked = '';
+			return Promise.resolve(true);
+		}
+		if (remoteRaceAudioPlaybackPromise) {
+			return remoteRaceAudioPlaybackPromise;
+		}
+		remoteRaceAudioPlaybackPromise = Promise.resolve(remoteRaceAudio.play())
+			.then(() => {
+				remoteRaceAudioPlaybackBlocked = '';
+				recordEvent('race audio playback ready', reason);
+				return true;
+			})
+			.catch((error) => {
+				remoteRaceAudioPlaybackBlocked = error.message || String(error);
+				recordEvent('race audio play blocked', remoteRaceAudioPlaybackBlocked);
+				return false;
+			})
+			.finally(() => {
+				remoteRaceAudioPlaybackPromise = null;
+			});
+		return remoteRaceAudioPlaybackPromise;
+	}
+
+	function unlockRemoteRaceAudioPlayback() {
+		ensureRemoteRaceAudioPlayback('user gesture');
+	}
+
+	function getRaceAudioMode() {
+		if (isRaceAnnouncementEnabled() && browserKokoroState === 'ready' && !browserKokoroFailure &&
+			remoteRaceAudioModes.has(browserKokoro?.MODE)) {
+			return browserKokoro.MODE;
+		}
+		return 'remote';
+	}
+
+	function stopBrowserKokoroPlayback(releaseMs = 250) {
+		const source = browserKokoroActiveSource;
+		const eventId = browserKokoroActiveEventId;
+		browserKokoroActiveSource = null;
+		browserKokoroActiveEventId = '';
+		if (source) {
+			source.onended = null;
+			try {
+				source.stop();
+			} catch (_) {
+				// The source may already have ended.
+			}
+		}
+		if (eventId) {
+			const state = remoteRaceAudioTracker.finish(eventId);
+			if (state.idle) setM5AudioDucking(1, releaseMs);
+		}
+	}
+
+	function fallbackBrowserKokoroPrompt(prompt, error) {
+		browserKokoroFailure = error?.message || String(error || 'browser Kokoro failed');
+		browserKokoroClient?.shutdown();
+		browserKokoroClient = null;
+		browserKokoroState = 'failed';
+		sendRaceAudioPreference();
+		const state = remoteRaceAudioTracker.finish(prompt?.promptId);
+		if (state.idle) setM5AudioDucking(1, prompt?.ducking?.releaseMs || 250);
+		const fallbackText = prompt?.fallbackText?.[raceAnnounceLanguage]
+			|| prompt?.fallbackText?.['en-US'];
+		if (fallbackText && state.idle) speakRaceLapAnnouncement({ text: fallbackText });
+		recordEvent('browser Kokoro fallback', browserKokoroFailure);
+	}
+
+	async function playBrowserKokoroAudio(prompt, generated) {
+		const context = getRaceSignalAudioContext();
+		if (!context) throw new Error('AudioContext is unavailable');
+		await context.resume?.();
+		if (context.state !== 'running') throw new Error(`AudioContext is ${context.state}`);
+		const samples = generated.samples instanceof ArrayBuffer
+			? new Float32Array(generated.samples)
+			: generated.samples instanceof Float32Array ? generated.samples : null;
+		const sampleRate = Number(generated.sampleRate);
+		if (!samples?.length || !Number.isFinite(sampleRate) || sampleRate < 8000 || sampleRate > 96000) {
+			throw new Error('Browser Kokoro returned invalid PCM audio');
+		}
+		stopBrowserKokoroPlayback(0);
+		if (supportsRaceAnnouncement()) window.speechSynthesis.cancel();
+		const buffer = context.createBuffer(1, samples.length, sampleRate);
+		buffer.copyToChannel(samples, 0);
+		const source = context.createBufferSource();
+		const gain = context.createGain();
+		source.buffer = buffer;
+		gain.gain.value = RACE_ANNOUNCE_VOLUME;
+		source.connect(gain);
+		gain.connect(context.destination);
+		browserKokoroActiveSource = source;
+		browserKokoroActiveEventId = prompt.promptId;
+		remoteRaceAudioTracker.play(prompt.promptId);
+		setM5AudioDucking(Number(prompt.ducking?.m5AudioGain) || 0.4, prompt.ducking?.attackMs || 80);
+		source.onended = () => {
+			if (browserKokoroActiveSource !== source) return;
+			browserKokoroActiveSource = null;
+			browserKokoroActiveEventId = '';
+			const state = remoteRaceAudioTracker.finish(prompt.promptId);
+			if (state.idle) setM5AudioDucking(1, prompt.ducking?.releaseMs || 250);
+		};
+		source.start();
+		recordEvent('browser Kokoro playing', `${prompt.language} ${generated.generationMs}ms`);
+	}
+
+	function ensureBrowserKokoroRuntime() {
+		if (!isRaceAnnouncementEnabled() || browserKokoroFailure ||
+			!remoteRaceAudioModes.has(browserKokoro?.MODE) || !browserKokoro?.isSupported?.(window)) {
+			return Promise.resolve(false);
+		}
+		if (!browserKokoroClient) {
+			browserKokoroClient = browserKokoro.createClient({
+				environment: window,
+				workerUrl: './browser-kokoro-worker.mjs',
+				onState: (snapshot, detail) => {
+					browserKokoroState = snapshot.state;
+					if (snapshot.state === 'ready') {
+						recordEvent('browser Kokoro ready', `${detail.loadMs || 0}ms`);
+						sendRaceAudioPreference();
+					}
+				},
+				onAudio: (prompt, generated) => {
+					playBrowserKokoroAudio(prompt, generated)
+						.catch((error) => fallbackBrowserKokoroPrompt(prompt, error));
+				},
+				onError: fallbackBrowserKokoroPrompt,
+				onDropped: (prompt, reason) => {
+					const state = remoteRaceAudioTracker.finish(prompt.promptId);
+					if (state.idle) setM5AudioDucking(1, prompt.ducking?.releaseMs || 250);
+					recordEvent('browser Kokoro dropped', `${prompt.promptId} ${reason}`);
+				},
+			});
+		}
+		return browserKokoroClient.load()
+			.then(() => true)
+			.catch((error) => {
+				browserKokoroFailure = error.message || String(error);
+				browserKokoroState = 'failed';
+				sendRaceAudioPreference();
+				recordEvent('browser Kokoro unavailable', browserKokoroFailure);
+				return false;
+			});
+	}
+
+	function handleRemoteRaceAudioMessage(message) {
+		const payload = raceAnnouncer.parseRemoteMessage(message);
+		if (!payload) return false;
+		if (payload.type === 'race_audio_capabilities') {
+			remoteRaceAudioEnabled = payload.state === 'enabled';
+			remoteRaceAudioModes = new Set(Array.isArray(payload.modes) ? payload.modes : ['remote']);
+			ensureBrowserKokoroRuntime();
+			recordEvent('race audio capabilities', `${payload.state || 'unknown'} ${payload.language || ''}`.trim());
+			return true;
+		}
+		if (payload.state === 'queued' || payload.state === 'ready') {
+			remoteRaceAudioEnabled = true;
+			const state = remoteRaceAudioTracker.queue(payload.eventId);
+			if (payload.state === 'queued' && state.wasIdle) playRaceRadioCueSound();
+			return true;
+		}
+		if (payload.state === 'prompt') {
+			remoteRaceAudioEnabled = true;
+			remoteRaceAudioTracker.queue(payload.eventId);
+			const prompt = {
+				...payload.prompt,
+				promptId: payload.eventId,
+				fallbackText: payload.fallbackText,
+				ducking: payload.ducking,
+			};
+			try {
+				if (getRaceAudioMode() !== browserKokoro?.MODE || !browserKokoroClient) {
+					throw new Error('Browser Kokoro runtime is not ready');
+				}
+				browserKokoroClient.enqueue(prompt);
+			} catch (error) {
+				fallbackBrowserKokoroPrompt(prompt, error);
+			}
+			return true;
+		}
+		if (payload.state === 'playing') {
+			stopRaceAnnouncement();
+			remoteRaceAudioTracker.play(payload.eventId);
+			setM5AudioDucking(Number(payload.ducking?.m5AudioGain) || 0.4, payload.ducking?.attackMs || 80);
+			ensureRemoteRaceAudioPlayback('playing event');
+			recordEvent('race audio playing', `${payload.kind || 'event'} ${payload.language || ''}`.trim());
+			return true;
+		}
+		if (payload.state === 'ended') {
+			const state = remoteRaceAudioTracker.finish(payload.eventId);
+			if (state.idle) {
+				setM5AudioDucking(1, payload.ducking?.releaseMs || 250);
+			}
+			return true;
+		}
+		if (payload.state === 'failed') {
+			const state = remoteRaceAudioTracker.finish(payload.eventId);
+			if (state.idle) setM5AudioDucking(1, payload.ducking?.releaseMs || 250);
+			const fallbackText = payload.fallbackText?.[raceAnnounceLanguage]
+				|| payload.fallbackText?.['en-US'];
+			if (fallbackText && state.idle) speakRaceLapAnnouncement({ text: fallbackText });
+			recordEvent('race audio fallback', payload.error || 'remote failed');
+			return true;
+		}
+		return true;
+	}
+
+	function isRaceAnnouncementEnabled() {
+		return RACE_ANNOUNCE_ENABLED && raceAnnounceLanguage !== 'off';
+	}
+
+	function sendRaceAudioPreference() {
+		if (raceAudioChannel?.readyState !== 'open') return false;
+		raceAudioChannel.send(raceAnnouncer.buildRemotePreference(raceAnnounceLanguage, getRaceAudioMode()));
+		return true;
+	}
+
+  function requestPilotCallout() {
+    const callout = pilotCalloutPlanner.evaluate({
+      raceRunId: activeRaceRunId,
+      phaseCode: raceState.phaseCode,
+      battle: getRaceBattle(),
+    });
+    if (!callout || !isRaceAnnouncementEnabled() || !remoteRaceAudioEnabled ||
+        getRaceAudioMode() !== browserKokoro?.MODE || raceAudioChannel?.readyState !== 'open') {
+      return false;
+    }
+    try {
+      raceAudioChannel.send(raceAnnouncer.buildRemoteCalloutRequest(callout));
+      recordEvent('race audio callout requested',
+        `${callout.kind} car=${callout.carNumber} gap=${callout.gapMs} reason=${callout.reason}`);
+      return true;
+    } catch (error) {
+      recordEvent('race audio callout rejected', error.message || String(error));
+      return false;
+    }
+  }
+
+	function setRaceAnnouncementLanguage(value, persist = true) {
+		const nextLanguage = raceAnnouncer.normalizeRemoteLanguage(value, RACE_ANNOUNCE_ENABLED);
+		if (persist) {
+			try {
+				window.localStorage?.setItem(RACE_ANNOUNCE_LANGUAGE_STORAGE_KEY, nextLanguage);
+			} catch (_) {
+				// Private browsing may reject persistent storage; the current selection still applies.
+			}
+		}
+		raceAnnounceLanguage = nextLanguage;
+		if (raceAnnounceLanguageSelect) raceAnnounceLanguageSelect.value = nextLanguage;
+		stopRaceAnnouncement();
+		selectedRaceAnnouncementVoiceName = '';
+		if (isRaceAnnouncementEnabled()) prepareRaceAnnouncement();
+		ensureBrowserKokoroRuntime();
+		sendRaceAudioPreference();
+		recordEvent('race audio preference', nextLanguage);
+	}
+
   function prepareRaceAnnouncement() {
-    if (!RACE_ANNOUNCE_ENABLED || !supportsRaceAnnouncement()) {
+    if (!isRaceAnnouncementEnabled() || !supportsRaceAnnouncement()) {
       return false;
     }
     try {
       const voice = raceAnnouncer.selectPreferredVoice(window.speechSynthesis.getVoices(), {
-        language: RACE_ANNOUNCE_LANGUAGE,
+        language: raceAnnounceLanguage,
         preferredName: RACE_ANNOUNCE_VOICE,
       });
       selectedRaceAnnouncementVoiceName = voice?.name || '';
@@ -2423,10 +2933,9 @@
   }
 
   function stopRaceAnnouncement() {
-    if (!supportsRaceAnnouncement()) {
-      return;
-    }
-    window.speechSynthesis.cancel();
+		browserKokoroClient?.clear?.();
+		stopBrowserKokoroPlayback();
+		if (supportsRaceAnnouncement()) window.speechSynthesis.cancel();
   }
 
   function getRaceLapAnnouncement() {
@@ -2445,6 +2954,7 @@
       bestLapMs,
       overallBestLapMs,
       position: raceState.position,
+      language: raceAnnounceLanguage,
     });
     if (!announcement) return null;
     return {
@@ -2454,7 +2964,7 @@
   }
 
   function speakRaceLapAnnouncement(announcement) {
-    if (!RACE_ANNOUNCE_ENABLED || !announcement) {
+    if (!isRaceAnnouncementEnabled() || !announcement) {
       return false;
     }
     if (!prepareRaceAnnouncement()) {
@@ -2463,11 +2973,11 @@
     }
     try {
       const utterance = new window.SpeechSynthesisUtterance(announcement.text);
-      utterance.lang = RACE_ANNOUNCE_LANGUAGE;
+      utterance.lang = raceAnnounceLanguage;
       utterance.rate = RACE_ANNOUNCE_RATE;
       utterance.volume = RACE_ANNOUNCE_VOLUME;
       const voice = raceAnnouncer.selectPreferredVoice(window.speechSynthesis.getVoices(), {
-        language: RACE_ANNOUNCE_LANGUAGE,
+        language: raceAnnounceLanguage,
         preferredName: RACE_ANNOUNCE_VOICE,
       });
       selectedRaceAnnouncementVoiceName = voice?.name || '';
@@ -2519,6 +3029,9 @@
       return;
     }
     lastRaceLapAnnouncementKey = nextAnnouncement.key;
+		if (remoteRaceAudioEnabled) {
+			return;
+		}
     speakRaceLapAnnouncement(nextAnnouncement);
   }
 
@@ -2542,6 +3055,7 @@
       pitStopwatchState = null;
       raceState.phase = 'STANDBY';
       raceState.phaseCode = 'idle';
+      raceState.sessionType = '';
       raceState.status = '';
       raceState.carId = '';
       raceState.lap = null;
@@ -2559,10 +3073,12 @@
       raceState.laps = [];
       raceState.rivals = [];
       raceState.clockRunning = false;
+      renderedRaceLapHistorySignature = '';
       hideRearAttention(true);
       raceStartSignalGreenUntil = 0;
       lastRaceLapAnnouncementKey = '';
       lastRaceSignalSoundKey = '';
+      pilotCalloutPlanner.clear(activeRaceRunId);
       stopRaceAnnouncement();
       hideRaceMilestone(true);
     }
@@ -2572,6 +3088,9 @@
     }
     if (typeof nextState.phaseCode === 'string' && nextState.phaseCode.trim()) {
       raceState.phaseCode = normalizeRacePhaseCode(nextState.phaseCode);
+    }
+    if (Object.prototype.hasOwnProperty.call(nextState, 'sessionType')) {
+      raceState.sessionType = String(nextState.sessionType || '').trim().toLowerCase();
     }
     if (typeof nextState.carId === 'string') {
       raceState.carId = nextState.carId.trim();
@@ -2617,6 +3136,7 @@
     syncRaceMilestone(previousAnnouncement, hadPreviousRaceState && nextState.reset !== true);
     syncRaceStartSignalSound(!hadPreviousRaceState || nextState.reset === true);
     announceRaceLapIfChanged(previousAnnouncement, hadPreviousRaceState && nextState.reset !== true);
+    requestPilotCallout();
     return true;
   }
 
@@ -2710,6 +3230,7 @@
     if (RACE_MILESTONE_DEMO === 'goal') {
       raceState.phase = 'FINISHED';
       raceState.phaseCode = 'finished';
+      raceState.sessionType = 'race';
       raceState.status = 'finished';
       raceState.carId = raceState.carId || RACE_CAR_ID || 'FPV-02';
       raceState.position = 2;
@@ -2717,9 +3238,16 @@
       raceState.lap = 10;
       raceState.lapCount = 10;
       raceState.totalTimeMs = 134_444;
+      raceState.bestLapMs = 12_980;
+      raceState.laps = [
+        { lap: 10, timeMs: 13_120 },
+        { lap: 9, timeMs: 12_980 },
+        { lap: 8, timeMs: 13_240 },
+      ];
       evaluateRaceAttention();
       renderRaceHud();
       showRaceGoalMilestone();
+      scheduleRaceResultSummary();
       return;
     }
     if (RACE_MILESTONE_DEMO === 'safety') {
@@ -3453,14 +3981,13 @@
   }
 
   function classifyLowVital(value, warning, critical, previous, hysteresis) {
-    if (!Number.isFinite(value)) return 'unavailable';
-    if (previous === 'critical' && value <= critical + hysteresis) return 'critical';
-    if (previous === 'warning' && value <= warning + hysteresis) {
-      return value <= critical ? 'critical' : 'warning';
-    }
-    if (value <= critical) return 'critical';
-    if (value <= warning) return 'warning';
-    return 'normal';
+    return window.FpvTelemetry?.classifyLowTelemetryValue?.(
+      value,
+      warning,
+      critical,
+      previous,
+      hysteresis,
+    ) || 'unavailable';
   }
 
   function classifyHighVital(value, warning, critical, previous, hysteresis) {
@@ -3499,6 +4026,7 @@
   function updateVehicleVitals(nowMs = performance.now()) {
     if (!vehicleVitals) return;
     const snapshot = getCurrentEscSnapshot(nowMs);
+    updateVehicleStatusClusterVisibility(snapshot);
     renderVehicleSpeed(snapshot, nowMs);
     const esc = snapshot?.state?.esc;
     if (!snapshot || !esc) {
@@ -4254,15 +4782,19 @@
     return isGamepadDriveActive();
   }
 
+  function updateVehicleStatusClusterVisibility(snapshot = getCurrentEscSnapshot()) {
+    if (!vehicleStatusCluster) return;
+    const hasEscTelemetry = Boolean(snapshot?.state?.esc);
+    vehicleStatusCluster.hidden = !(isDriveUiVisible() || hasEscTelemetry);
+  }
+
   function updateControlUiMode() {
     const driveUiVisible = isDriveUiVisible();
     document.body.classList.toggle('drive-ui', driveUiVisible);
     if (driveHud) {
       driveHud.hidden = !driveUiVisible;
     }
-    if (vehicleStatusCluster) {
-      vehicleStatusCluster.hidden = !driveUiVisible;
-    }
+    updateVehicleStatusClusterVisibility();
     updateDriveHud();
     updateOsdScale();
   }
@@ -5317,6 +5849,7 @@
     const currentDataChannel = dataChannel;
     const currentTelemetryChannel = telemetryChannel;
     const currentRaceChannel = raceChannel;
+		const currentRaceAudioChannel = raceAudioChannel;
     const currentDriveChannel = driveChannel;
     const currentEventsChannel = eventsChannel;
     const currentPeerConnection = peerConnection;
@@ -5342,6 +5875,11 @@
       currentRaceChannel.onclose = null;
       currentRaceChannel.onmessage = null;
     }
+		if (currentRaceAudioChannel) {
+			currentRaceAudioChannel.onopen = null;
+			currentRaceAudioChannel.onclose = null;
+			currentRaceAudioChannel.onmessage = null;
+		}
     if (currentDriveChannel) {
       currentDriveChannel.onopen = null;
       currentDriveChannel.onclose = null;
@@ -5386,6 +5924,12 @@
       } catch (_) {
       }
     }
+		if (currentRaceAudioChannel) {
+			try {
+				currentRaceAudioChannel.close();
+			} catch (_) {
+			}
+		}
     if (currentDriveChannel) {
       try {
         currentDriveChannel.close();
@@ -5415,6 +5959,7 @@
     dataChannel = null;
     telemetryChannel = null;
     raceChannel = null;
+		raceAudioChannel = null;
     driveChannel = null;
     eventsChannel = null;
     audioSender = null;
@@ -5436,6 +5981,15 @@
     decodedFrameHistory = [];
     remoteVideo.pause();
     remoteVideo.srcObject = null;
+		remoteRaceAudio.pause();
+		remoteRaceAudio.srcObject = null;
+		remoteRaceAudioPlaybackPromise = null;
+		remoteRaceAudioPlaybackBlocked = '';
+		remoteRaceAudioEnabled = false;
+		remoteRaceAudioModes = new Set(['remote']);
+		remoteRaceAudioTracker.reset();
+		stopRaceAnnouncement();
+		setM5AudioDucking(1, 0);
     updateUiState();
   }
 
@@ -5973,6 +6527,29 @@
       raceChannel.onmessage = (event) => handleRaceStateMessage(event.data);
     };
 
+		const attachRaceAudioChannel = (channel) => {
+			channel.fpvTransportGeneration = generation;
+			if (raceAudioChannel && raceAudioChannel !== channel) {
+				raceAudioChannel.onopen = null;
+				raceAudioChannel.onclose = null;
+				raceAudioChannel.onmessage = null;
+			}
+			raceAudioChannel = channel;
+			raceAudioChannel.onopen = () => {
+				recordEvent('race audio dc open');
+				sendRaceAudioPreference();
+			};
+			raceAudioChannel.onclose = () => {
+				remoteRaceAudioEnabled = false;
+				remoteRaceAudioModes = new Set(['remote']);
+				remoteRaceAudioTracker.reset();
+				stopRaceAnnouncement();
+				setM5AudioDucking(1, 250);
+				recordEvent('race audio dc close');
+			};
+			raceAudioChannel.onmessage = (event) => handleRemoteRaceAudioMessage(event.data);
+		};
+
     const attachDriveChannel = (channel) => {
       channel.fpvTransportGeneration = generation;
       if (driveChannel && driveChannel !== channel) {
@@ -6014,6 +6591,8 @@
     peer.ondatachannel = (event) => {
       if (event.channel.label === 'momo-race') {
         attachRaceChannel(event.channel);
+			} else if (event.channel.label === 'momo-race-audio') {
+				attachRaceAudioChannel(event.channel);
       } else if (event.channel.label === 'momo-telemetry') {
         attachTelemetryChannel(event.channel);
       } else if (event.channel.label === 'momo-drive') {
@@ -6030,6 +6609,9 @@
       maxRetransmits: 0,
     }));
     if (usesRelayTransport()) {
+			attachRaceAudioChannel(peer.createDataChannel('momo-race-audio', {
+				ordered: true,
+			}));
       attachDriveChannel(peer.createDataChannel('momo-drive', {
         ordered: true,
       }));
@@ -6049,7 +6631,13 @@
 
     const mediaStream = new MediaStream();
     remoteVideo.srcObject = mediaStream;
-    peer.ontrack = (event) => {
+		peer.ontrack = (event) => {
+			if (event.track.kind === 'audio' && usesRelayTransport()) {
+				remoteRaceAudio.srcObject = new MediaStream([event.track]);
+				event.track.addEventListener?.('unmute', () => ensureRemoteRaceAudioPlayback('track unmuted'));
+				ensureRemoteRaceAudioPlayback('audio track');
+				return;
+			}
       mediaStream.addTrack(event.track);
       remoteVideo.play().catch((error) => console.warn('video play failed:', error));
       updateUiState();
@@ -6083,6 +6671,9 @@
 
     const videoTransceiver = peer.addTransceiver('video', { direction: 'recvonly' });
     preferVideoCodec(videoTransceiver, getPreferredVideoCodec());
+		if (usesRelayTransport()) {
+			peer.addTransceiver('audio', { direction: 'recvonly' });
+		}
     if (!usesRelayTransport()) {
       const audioTransceiver = peer.addTransceiver('audio', { direction: 'sendrecv' });
       audioSender = audioTransceiver.sender;
@@ -7022,6 +7613,9 @@
   btnMirror.addEventListener('click', toggleVideoMirror);
   btnAudio.addEventListener('click', toggleAudio);
   btnAudioFilter?.addEventListener('click', toggleAudioFilter);
+  raceAnnounceLanguageSelect?.addEventListener('change', () => {
+    setRaceAnnouncementLanguage(raceAnnounceLanguageSelect.value);
+  });
   btnM5Audio?.addEventListener('click', async () => {
     if (!m5AudioPlayer) {
       return;
@@ -7099,7 +7693,21 @@
         q: AUDIO_FILTER_Q,
         contextState: audioContext?.state || 'none',
       },
-      m5Audio: m5AudioPlayer?.snapshot() || null,
+		m5Audio: m5AudioPlayer?.snapshot() || null,
+		raceAudio: {
+			enabled: remoteRaceAudioEnabled,
+			channel: snapshotDataChannelForCapture(raceAudioChannel),
+			paused: remoteRaceAudio.paused,
+			playbackBlocked: remoteRaceAudioPlaybackBlocked || null,
+			track: (() => {
+				const track = getRemoteRaceAudioTrack();
+				return track ? {
+					readyState: track.readyState,
+					muted: track.muted,
+					enabled: track.enabled,
+				} : null;
+			})(),
+		},
       downlink: {
         transport: usesWebSocketDownlink() ? 'websocket' : 'datachannel',
         websocketState: ws ? ['connecting', 'open', 'closing', 'closed'][ws.readyState] : 'none',
@@ -7143,6 +7751,7 @@
   setVideoMirror(isMirrorEnabledByDefault());
   setAudioEnabled(false);
   setAudioFilterEnabled(AUDIO_FILTER_DEFAULT);
+  setRaceAnnouncementLanguage(raceAnnounceLanguage, false);
   m5AudioPlayer = window.MomoM5Audio?.createPlayer({ onState: updateM5AudioUi }) || null;
   updateM5AudioUi();
   applyMediaControlsVisibility();
@@ -7156,11 +7765,13 @@
       rivals: raceState.rivals.map((rival) => ({ ...rival })),
     }),
     testBattle: () => setRaceState(createRaceBattleDemoState()),
-    testAnnouncement: () => speakRaceLapAnnouncement({
-      key: 'manual-test',
+    testAnnouncement: () => speakRaceLapAnnouncement(raceAnnouncer.buildLapAnnouncement({
       lap: 1,
-      text: 'Lap 1 complete. 18.320 seconds. New personal best. Position 1.',
-    }),
+      lapTimeMs: 18_320,
+      bestLapMs: 18_320,
+      position: 1,
+      language: raceAnnounceLanguage,
+    })),
     testSignalSound: (signal = 'red') => {
       unlockRaceSignalSound();
       return signal === 'green' ? playRaceGreenSignalSound() : playRaceCountdownSignalSound();
@@ -7173,10 +7784,14 @@
       lastKey: lastRaceSignalSoundKey || null,
     }),
     getAnnouncementDiagnostics: () => ({
-      enabled: RACE_ANNOUNCE_ENABLED,
+      enabled: isRaceAnnouncementEnabled(),
       supported: supportsRaceAnnouncement(),
-      language: RACE_ANNOUNCE_LANGUAGE,
+      language: raceAnnounceLanguage,
       voice: selectedRaceAnnouncementVoiceName || RACE_ANNOUNCE_VOICE || null,
+		mode: getRaceAudioMode(),
+		browserKokoroState,
+		browserKokoroFailure: browserKokoroFailure || null,
+		browserKokoro: browserKokoroClient?.snapshot?.() || null,
       rate: RACE_ANNOUNCE_RATE,
       volume: RACE_ANNOUNCE_VOLUME,
       lastKey: lastRaceLapAnnouncementKey || null,
@@ -7186,12 +7801,16 @@
       visible: Boolean(raceMilestone && !raceMilestone.hidden),
       kind: raceMilestone?.dataset.kind || null,
       result: raceMilestone?.dataset.result || null,
+      summaryDelayMs: RACE_SUMMARY_DELAY_MS,
+      summaryScheduled: Boolean(scheduledRaceSummaryKey),
     }),
     getNotificationDiagnostics: () => notificationController.getState(),
   };
   window.addEventListener('momo-race-state', (event) => setRaceState(event.detail));
-  window.addEventListener('pointerdown', unlockRaceSignalSound);
-  window.addEventListener('keydown', unlockRaceSignalSound);
+	window.addEventListener('pointerdown', unlockRaceSignalSound);
+	window.addEventListener('keydown', unlockRaceSignalSound);
+	window.addEventListener('pointerdown', unlockRemoteRaceAudioPlayback);
+	window.addEventListener('keydown', unlockRemoteRaceAudioPlayback);
   window.addEventListener('pointerdown', prepareRaceAnnouncement);
   window.addEventListener('keydown', prepareRaceAnnouncement);
   window.speechSynthesis?.addEventListener?.('voiceschanged', prepareRaceAnnouncement);
@@ -7206,7 +7825,7 @@
       || raceState.phaseCode === 'countdown'
       || raceState.phaseCode === 'green'
     ) {
-      renderRaceHud();
+      renderRaceClock();
       syncRaceStartSignalSound();
     }
   }, 100);
@@ -7235,6 +7854,7 @@
   });
   window.addEventListener('pagehide', () => {
     stopRaceAnnouncement();
+		browserKokoroClient?.shutdown();
     shutdownForPageHide();
   });
   startFpsMonitor();

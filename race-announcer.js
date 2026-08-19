@@ -11,6 +11,105 @@
 
   const QUALITY_VOICE_PATTERN = /natural|neural|online|enhanced|premium|google|aria|ava|jenny|sonia|ryan/i;
 
+  function normalizeRemoteLanguage(value, enabled = true) {
+    if (!enabled) return 'off';
+    const normalized = String(value || '').trim().toLowerCase();
+    if (normalized === 'ja' || normalized === 'ja-jp') return 'ja-JP';
+    if (normalized === 'off' || normalized === 'none' || normalized === 'disabled') return 'off';
+    return 'en-US';
+  }
+
+  function normalizeRemoteMode(value) {
+    return String(value || '').trim().toLowerCase() === 'browser-kokoro'
+      ? 'browser-kokoro'
+      : 'remote';
+  }
+
+  function buildRemotePreference(language, mode = 'remote') {
+    return JSON.stringify({
+      type: 'race_audio_preference',
+      version: 1,
+      language: normalizeRemoteLanguage(language, language !== 'off'),
+      mode: normalizeRemoteMode(mode),
+    });
+  }
+
+  function buildRemoteCalloutRequest(input = {}) {
+    const requestId = String(input.requestId || '').trim();
+    const kind = String(input.kind || '').trim().toLowerCase();
+    const carNumber = Number(input.carNumber);
+    const gapMs = Number(input.gapMs);
+    if (!/^[A-Za-z0-9._:-]{1,64}$/.test(requestId) ||
+        (kind !== 'gap_ahead' && kind !== 'gap_behind') ||
+        !Number.isInteger(carNumber) || carNumber < 1 || carNumber > 999 ||
+        !Number.isFinite(gapMs) || gapMs < 100 || gapMs > 5000) {
+      throw new Error('Invalid race audio callout request');
+    }
+    return JSON.stringify({
+      type: 'race_audio_callout_request',
+      version: 1,
+      requestId,
+      kind,
+      carNumber,
+      gapMs: Math.round(gapMs / 100) * 100,
+    });
+  }
+
+  function parseRemoteMessage(message) {
+    if (typeof message !== 'string' || !message.startsWith('RACE_AUDIO:')) return null;
+    try {
+      const payload = JSON.parse(message.slice('RACE_AUDIO:'.length));
+      if (!payload || typeof payload !== 'object' || payload.version !== 1) return null;
+      if (payload.type !== 'race_audio' && payload.type !== 'race_audio_capabilities') return null;
+      return payload;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function createRemoteAudioTracker() {
+    let playingEventId = '';
+    const pendingEventIds = new Set();
+
+    function snapshot(extra = {}) {
+      return Object.freeze({
+        playingEventId,
+        pendingCount: pendingEventIds.size,
+        idle: !playingEventId && pendingEventIds.size === 0,
+        ...extra,
+      });
+    }
+
+    return Object.freeze({
+      queue(eventId) {
+        const normalized = String(eventId || '').trim();
+        const wasIdle = !playingEventId && pendingEventIds.size === 0;
+        if (normalized) pendingEventIds.add(normalized);
+        return snapshot({ wasIdle });
+      },
+      play(eventId) {
+        const normalized = String(eventId || '').trim();
+        if (normalized) {
+          pendingEventIds.delete(normalized);
+          playingEventId = normalized;
+        }
+        return snapshot();
+      },
+      finish(eventId) {
+        const normalized = String(eventId || '').trim();
+        if (normalized) pendingEventIds.delete(normalized);
+        if (!normalized || normalized === playingEventId) playingEventId = '';
+        return snapshot();
+      },
+      reset() {
+        playingEventId = '';
+        pendingEventIds.clear();
+        return snapshot();
+      },
+      snapshot,
+    });
+  }
+
   function finiteNumber(value) {
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
@@ -27,32 +126,60 @@
     const roundedLapTimeMs = Math.round(lapTimeMs);
     const bestLapMs = finiteNumber(input.bestLapMs);
     const overallBestLapMs = finiteNumber(input.overallBestLapMs);
-    const position = finiteNumber(input.position);
     const isBestLap = bestLapMs !== null && Math.round(bestLapMs) === roundedLapTimeMs;
     const isOverallBest = overallBestLapMs !== null && Math.round(overallBestLapMs) === roundedLapTimeMs;
-    const segments = [
-      `Lap ${roundedLap} complete.`,
-      `${(roundedLapTimeMs / 1000).toFixed(3)} seconds.`,
-    ];
-
-    if (isOverallBest) {
-      segments.push('New overall fastest lap.');
-    } else if (isBestLap) {
-      segments.push('New personal best.');
-    } else if (bestLapMs !== null && roundedLapTimeMs > bestLapMs) {
-      segments.push(`${((roundedLapTimeMs - bestLapMs) / 1000).toFixed(3)} seconds off your best.`);
+    const language = normalizeRemoteLanguage(input.language);
+    if (language === 'ja-JP') {
+      return Object.freeze({
+        lap: roundedLap,
+        lapTimeMs: roundedLapTimeMs,
+        isBestLap,
+        isOverallBest,
+        text: `${roundedLap}周目、${(roundedLapTimeMs / 1000).toFixed(3)}`,
+      });
     }
-
-    if (position !== null && position >= 1) {
-      segments.push(`Position ${Math.floor(position)}.`);
-    }
-
     return Object.freeze({
       lap: roundedLap,
       lapTimeMs: roundedLapTimeMs,
       isBestLap,
       isOverallBest,
-      text: segments.join(' '),
+      text: `Lap ${roundedLap}. ${(roundedLapTimeMs / 1000).toFixed(3)} seconds`,
+    });
+  }
+
+  function buildRaceSummary(input = {}) {
+    if (String(input.sessionType || '').trim().toLowerCase() !== 'race') {
+      return null;
+    }
+    const lapTimes = Array.isArray(input.laps)
+      ? input.laps
+        .map((entry) => finiteNumber(entry?.timeMs))
+        .filter((value) => value !== null && value > 0)
+        .map(Math.round)
+      : [];
+    if (lapTimes.length === 0) return null;
+
+    const position = finiteNumber(input.position);
+    const fieldSize = finiteNumber(input.fieldSize);
+    const totalTimeMs = finiteNumber(input.totalTimeMs);
+    const suppliedBestLapMs = finiteNumber(input.bestLapMs);
+    const bestLapMs = suppliedBestLapMs !== null && suppliedBestLapMs > 0
+      ? Math.round(suppliedBestLapMs)
+      : Math.min(...lapTimes);
+    const averageLapMs = Math.round(
+      lapTimes.reduce((total, lapTimeMs) => total + lapTimeMs, 0) / lapTimes.length,
+    );
+    const lapTimeTotalMs = lapTimes.reduce((total, lapTimeMs) => total + lapTimeMs, 0);
+
+    return Object.freeze({
+      position: position !== null && position >= 1 ? Math.floor(position) : null,
+      fieldSize: fieldSize !== null && fieldSize >= 1 ? Math.floor(fieldSize) : null,
+      totalTimeMs: totalTimeMs !== null && totalTimeMs > 0
+        ? Math.round(totalTimeMs)
+        : lapTimeTotalMs,
+      bestLapMs,
+      averageLapMs,
+      completedLaps: lapTimes.length,
     });
   }
 
@@ -163,7 +290,14 @@
   }
 
   return Object.freeze({
+    buildRemoteCalloutRequest,
+    buildRemotePreference,
     buildLapAnnouncement,
+    buildRaceSummary,
+    createRemoteAudioTracker,
+    normalizeRemoteLanguage,
+    normalizeRemoteMode,
+    parseRemoteMessage,
     playSignal,
     selectPreferredVoice,
   });
