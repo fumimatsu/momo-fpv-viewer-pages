@@ -55,6 +55,35 @@
     });
   }
 
+  function buildSafetyAnnouncement(kind, language = 'en-US') {
+    const normalizedKind = String(kind || '').trim().toLowerCase();
+    const japanese = normalizeRemoteLanguage(language, true) === 'ja-JP';
+    const messages = {
+      yellow_flag: {
+        priority: 105,
+        en: 'Yellow flag. Reduce speed.',
+        ja: 'イエローフラッグ。減速してください。',
+      },
+      red_flag: {
+        priority: 120,
+        en: 'Red flag. Stop safely.',
+        ja: 'レッドフラッグ。安全に停止してください。',
+      },
+      wrong_way: {
+        priority: 115,
+        en: 'Wrong way. Turn around.',
+        ja: '逆走しています。進行方向を戻してください。',
+      },
+    };
+    const message = messages[normalizedKind];
+    if (!message) return null;
+    return Object.freeze({
+      kind: normalizedKind,
+      priority: message.priority,
+      text: japanese ? message.ja : message.en,
+    });
+  }
+
   function parseRemoteMessage(message) {
     if (typeof message !== 'string' || !message.startsWith('RACE_AUDIO:')) return null;
     try {
@@ -131,11 +160,15 @@
     const achievement = String(input.achievement || '').trim().toLowerCase();
     const isPersonalBestUpdate = achievement === 'personal_best';
     const isOverallBestUpdate = achievement === 'overall_best';
+    const isFinalLap = input.finalLap === true;
     const language = normalizeRemoteLanguage(input.language);
     if (language === 'ja-JP') {
       const suffix = isOverallBestUpdate
         ? '。全体ベスト更新。'
         : isPersonalBestUpdate ? '。自己ベスト更新。' : '';
+      const finalLapSuffix = isFinalLap
+        ? `${suffix ? '' : '。'}ファイナルラップ。`
+        : '';
       return Object.freeze({
         lap: roundedLap,
         lapTimeMs: roundedLapTimeMs,
@@ -145,12 +178,14 @@
         isOverallBest,
         isPersonalBestUpdate,
         isOverallBestUpdate,
-        text: `${roundedLap}周目、${(roundedLapTimeMs / 1000).toFixed(3)}${suffix}`,
+        isFinalLap,
+        text: `${roundedLap}周目、${(roundedLapTimeMs / 1000).toFixed(3)}${suffix}${finalLapSuffix}`,
       });
     }
     const suffix = isOverallBestUpdate
       ? '. New overall best.'
       : isPersonalBestUpdate ? '. New personal best.' : '';
+    const finalLapSuffix = isFinalLap ? `${suffix ? ' ' : '. '}Final lap.` : '';
     return Object.freeze({
       lap: roundedLap,
       lapTimeMs: roundedLapTimeMs,
@@ -160,7 +195,8 @@
       isOverallBest,
       isPersonalBestUpdate,
       isOverallBestUpdate,
-      text: `Lap ${roundedLap}. ${(roundedLapTimeMs / 1000).toFixed(3)} seconds${suffix}`,
+      isFinalLap,
+      text: `Lap ${roundedLap}. ${(roundedLapTimeMs / 1000).toFixed(3)} seconds${suffix}${finalLapSuffix}`,
     });
   }
 
@@ -307,6 +343,7 @@
   }
 
   return Object.freeze({
+    buildSafetyAnnouncement,
     buildRemoteCalloutRequest,
     buildRemotePreference,
     buildLapAnnouncement,
