@@ -200,6 +200,23 @@
     });
   }
 
+  function buildQualifyingAnnouncement(input = {}) {
+    const { position, bestLapMs, bestLapGapToAheadMs: gap } = input;
+    if (input.sessionType !== 'qualify' || !Number.isInteger(position) || position < 1 ||
+        !Number.isInteger(bestLapMs) || bestLapMs <= 0) return null;
+    const hasGap = position > 1 && Number.isInteger(gap) && gap >= 0 && gap < bestLapMs;
+    const japanese = normalizeRemoteLanguage(input.language) === 'ja-JP';
+    let text = japanese ? `${position}位。` : `P ${position}.`;
+    if (position === 1) text = japanese ? 'トップ。' : 'Leading.';
+    else if (hasGap && gap === 0) text += japanese
+      ? `${position - 1}位と同タイム。` : ` Tied with P ${position - 1}.`;
+    else if (hasGap) text += japanese
+      ? `${position - 1}位との差、${(gap / 1000).toFixed(3)}秒。`
+      : ` Gap to P ${position - 1}, ${(gap / 1000).toFixed(3)} seconds.`;
+    return Object.freeze({ kind: 'qualifying_update', priority: 50, text,
+      key: `${position}:${bestLapMs}:${hasGap ? gap : 'unknown'}` });
+  }
+
   function buildRaceSummary(input = {}) {
     if (String(input.sessionType || '').trim().toLowerCase() !== 'race') {
       return null;
@@ -347,6 +364,7 @@
     buildRemoteCalloutRequest,
     buildRemotePreference,
     buildLapAnnouncement,
+    buildQualifyingAnnouncement,
     buildRaceSummary,
     createRemoteAudioTracker,
     normalizeRemoteLanguage,
